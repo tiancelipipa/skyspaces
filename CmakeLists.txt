@@ -17,6 +17,14 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(SKYSPACES_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(SKYSPACES_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_DEMOS OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_BLAS OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_LAPACK OFF CACHE BOOL "" FORCE)
+add_subdirectory(3rdparty/eigen)
+
 set(SKYSPACES_LIBRARY_SOURCES
     "${SKYSPACES_SRC_DIR}/Fluid2D.cpp"
     "${SKYSPACES_SRC_DIR}/MACGrid2D.cpp"
@@ -38,6 +46,11 @@ add_library(skyspaces_2d_fluid STATIC
 target_include_directories(skyspaces_2d_fluid
     PUBLIC
         "${SKYSPACES_INCLUDE_DIR}"
+)
+
+target_link_libraries(skyspaces_2d_fluid
+    PUBLIC
+        Eigen3::Eigen
 )
 
 target_compile_features(skyspaces_2d_fluid PUBLIC cxx_std_17)
