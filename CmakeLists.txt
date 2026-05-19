@@ -1,0 +1,88 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(
+    skyspaces_2d_fluid
+    VERSION 0.1.0
+    DESCRIPTION "A small 2D fluid simulation library and demo"
+    LANGUAGES CXX
+)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+set(SKYSPACES_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
+set(SKYSPACES_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+set(SKYSPACES_LIBRARY_SOURCES
+    "${SKYSPACES_SRC_DIR}/Fluid2D.cpp"
+    "${SKYSPACES_SRC_DIR}/MACGrid2D.cpp"
+    "${SKYSPACES_SRC_DIR}/Interpolation2D.cpp"
+)
+
+set(SKYSPACES_LIBRARY_HEADERS
+    "${SKYSPACES_INCLUDE_DIR}/Fluid2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/Interpolation2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/MACGrid2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/Vector2D.h"
+)
+
+add_library(skyspaces_2d_fluid STATIC
+    ${SKYSPACES_LIBRARY_SOURCES}
+    ${SKYSPACES_LIBRARY_HEADERS}
+)
+
+target_include_directories(skyspaces_2d_fluid
+    PUBLIC
+        "${SKYSPACES_INCLUDE_DIR}"
+)
+
+target_compile_features(skyspaces_2d_fluid PUBLIC cxx_std_17)
+
+if(MSVC)
+    target_compile_options(skyspaces_2d_fluid
+        PRIVATE
+            /W4
+            /permissive-
+            /utf-8
+    )
+
+    target_compile_definitions(skyspaces_2d_fluid
+        PRIVATE
+            _CRT_SECURE_NO_WARNINGS
+    )
+
+    set_property(TARGET skyspaces_2d_fluid PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+else()
+    target_compile_options(skyspaces_2d_fluid
+        PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+    )
+endif()
+
+set_target_properties(skyspaces_2d_fluid PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+
+foreach(config Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${config}" config_upper)
+
+    set_target_properties(skyspaces_2d_fluid PROPERTIES
+        "ARCHIVE_OUTPUT_DIRECTORY_${config_upper}" "${CMAKE_BINARY_DIR}/lib/${config}"
+        "LIBRARY_OUTPUT_DIRECTORY_${config_upper}" "${CMAKE_BINARY_DIR}/lib/${config}"
+    )
+endforeach()
+
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
+    ${SKYSPACES_LIBRARY_SOURCES}
+    ${SKYSPACES_LIBRARY_HEADERS}
+)
+
+message(STATUS "Configuring for generator: ${CMAKE_GENERATOR}")
+message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
