@@ -1,5 +1,9 @@
+# 声明本项目要求的最低 CMake 版本。版本太低时，CMake 会直接报错，
+# 避免使用旧 CMake 时出现难以理解的兼容性问题。
 cmake_minimum_required(VERSION 3.20)
 
+# 定义项目名称、版本、描述和使用的语言。
+# 这里 LANGUAGES CXX 表示这个项目是 C++ 项目。
 project(
     skyspaces_2d_fluid
     VERSION 0.1.0
@@ -7,59 +11,118 @@ project(
     LANGUAGES CXX
 )
 
+# 设置整个项目默认使用 C++17。
+# REQUIRED ON 表示编译器必须支持 C++17；EXTENSIONS OFF 表示尽量使用标准 C++，
+# 不开启编译器自己的非标准扩展，例如 gnu++17。
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# 生成 compile_commands.json，方便 clangd、VS Code 等工具理解项目。
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# 让 Visual Studio 这类 IDE 可以按文件夹组织目标和文件。
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+# 记录项目的头文件目录和源文件目录。
+# 使用变量可以避免后面反复手写同一段路径。
 set(SKYSPACES_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(SKYSPACES_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+set(SKYSPACES_DEMO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/demo")
 
+# Eigen 是 header-only 库，本身不需要编译成 .lib/.dll。
+# 这里关闭 Eigen 自带的测试、文档、demo、BLAS/LAPACK 等内容，
+# 让它作为本项目的第三方头文件库被使用即可。
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DEMOS OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_BLAS OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_LAPACK OFF CACHE BOOL "" FORCE)
+
+# 把 submodule 中的 Eigen CMake 工程加入当前构建。
+# 这会创建 Eigen3::Eigen 这个 CMake target，后面可以链接到自己的库上。
 add_subdirectory(3rdparty/eigen)
 
+# 收集本项目静态库需要编译的 .cpp 文件。
 set(SKYSPACES_LIBRARY_SOURCES
+    "${SKYSPACES_SRC_DIR}/AdvectionIntegrator2D.cpp"
     "${SKYSPACES_SRC_DIR}/Fluid2D.cpp"
-    "${SKYSPACES_SRC_DIR}/MACGrid2D.cpp"
+    "${SKYSPACES_SRC_DIR}/Grid2D.cpp"
     "${SKYSPACES_SRC_DIR}/Interpolation2D.cpp"
+    "${SKYSPACES_SRC_DIR}/PressureSolver2D.cpp"
 )
 
+# 收集本项目公开头文件。
+# 头文件不会被“编译”，但列在 target 里可以让 IDE 显示得更完整。
 set(SKYSPACES_LIBRARY_HEADERS
+    "${SKYSPACES_INCLUDE_DIR}/AdvectionIntegrator2D.h"
     "${SKYSPACES_INCLUDE_DIR}/Fluid2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/Grid2D.h"
     "${SKYSPACES_INCLUDE_DIR}/Interpolation2D.h"
-    "${SKYSPACES_INCLUDE_DIR}/MACGrid2D.h"
-    "${SKYSPACES_INCLUDE_DIR}/Vector2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/MathTypes.h"
+    "${SKYSPACES_INCLUDE_DIR}/PressureSolver2D.h"
 )
 
+# 收集 demo 程序的源文件。demo 是独立可执行程序，用来演示库的使用方式。
+set(SKYSPACES_DEMO_SOURCES
+    "${SKYSPACES_DEMO_DIR}/SmokeDensityDemo.cpp"
+)
+
+# 创建一个静态库 target，名字是 skyspaces_2d_fluid。
+# STATIC 表示最终产物是 .lib/.a 这类静态库。
 add_library(skyspaces_2d_fluid STATIC
     ${SKYSPACES_LIBRARY_SOURCES}
     ${SKYSPACES_LIBRARY_HEADERS}
 )
 
+# 给 skyspaces_2d_fluid 添加公开 include 路径。
+# PUBLIC 表示：本库自己能 include 这些头文件，链接本库的其他 target 也能继承这个路径。
 target_include_directories(skyspaces_2d_fluid
     PUBLIC
         "${SKYSPACES_INCLUDE_DIR}"
 )
 
+# 让 skyspaces_2d_fluid 使用 Eigen。
+# Eigen3::Eigen 会把 Eigen 的头文件路径传递给本库以及链接本库的使用者。
 target_link_libraries(skyspaces_2d_fluid
     PUBLIC
         Eigen3::Eigen
 )
 
+# 明确声明这个 target 需要 C++17。
+# 即使以后项目里出现多个 target，也能保证这个库自己的语言标准正确。
 target_compile_features(skyspaces_2d_fluid PUBLIC cxx_std_17)
 
+# 创建一个演示程序：运行 2D 烟雾模拟，并把烟雾密度保存为 PNG 图片。
+add_executable(skyspaces_smoke_density_demo
+    ${SKYSPACES_DEMO_SOURCES}
+)
+
+# demo 依赖前面创建的静态库，因此只需要链接 skyspaces_2d_fluid。
+# include 路径和 Eigen 会通过 PUBLIC 依赖自动继承过来。
+target_link_libraries(skyspaces_smoke_density_demo
+    PRIVATE
+        skyspaces_2d_fluid
+)
+
+target_compile_features(skyspaces_smoke_density_demo PRIVATE cxx_std_17)
+
+# 根据不同编译器设置警告选项。
+# MSVC 是 Visual Studio 的 C++ 编译器；else 分支通常对应 GCC/Clang。
 if(MSVC)
+    # Eigen 的部分头文件注释里包含 UTF-8 字符；MSVC 默认使用本机代码页(中文 Windows
+    # 通常是 936)读取源文件时会触发 C4819。这里给每个会直接编译源码的 target
+    # 显式加 /utf-8，因为 PRIVATE 编译选项不会通过 target_link_libraries 传给 demo。
     target_compile_options(skyspaces_2d_fluid
         PRIVATE
             /W4
             /permissive-
+            /utf-8
+    )
+
+    target_compile_options(skyspaces_smoke_density_demo
+        PRIVATE
             /utf-8
     )
 
@@ -68,6 +131,8 @@ if(MSVC)
             _CRT_SECURE_NO_WARNINGS
     )
 
+    # 指定 MSVC 运行时库。这里使用 DLL 版本的运行时库：
+    # Debug 下是 MultiThreadedDebugDLL，其他配置是 MultiThreadedDLL。
     set_property(TARGET skyspaces_2d_fluid PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 else()
     target_compile_options(skyspaces_2d_fluid
@@ -78,11 +143,14 @@ else()
     )
 endif()
 
+# 设置库文件的输出目录。
+# CMAKE_BINARY_DIR 是构建目录，例如 build/。
 set_target_properties(skyspaces_2d_fluid PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
 
+# 对多配置生成器，比如 Visual Studio，分别设置 Debug/Release 等配置的输出目录。
 foreach(config Debug Release RelWithDebInfo MinSizeRel)
     string(TOUPPER "${config}" config_upper)
 
@@ -92,10 +160,13 @@ foreach(config Debug Release RelWithDebInfo MinSizeRel)
     )
 endforeach()
 
+# 在支持 source group 的 IDE 中，按真实目录结构展示源文件和头文件。
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     ${SKYSPACES_LIBRARY_SOURCES}
     ${SKYSPACES_LIBRARY_HEADERS}
+    ${SKYSPACES_DEMO_SOURCES}
 )
 
+# 配置阶段打印一些信息，方便确认当前使用的生成器和编译器。
 message(STATUS "Configuring for generator: ${CMAKE_GENERATOR}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")

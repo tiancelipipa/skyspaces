@@ -1,652 +1,633 @@
 #include "Fluid2D.h"
-#include "Interpolation2D.h"
+
+#include <Eigen/Sparse>
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace skyspaces {
+
+namespace {
+
+Real Clamp(Real value, Real min_value, Real max_value) {
+    return std::max(min_value, std::min(value, max_value));
+}
+
+int ClampIndex(int value, int min_value, int max_value) {
+    return std::max(min_value, std::min(value, max_value));
+}
+
+int CellIndex(int x, int y, int height) {
+    // Keep vectorized pressure storage aligned with the row-major x/y grid.
+    return x * height + y;
+}
+
+}  // namespace
 
 Fluid2D::Fluid2D(Config config) : config_(config) {
     InitializeFromConfig_();
 }
 
 void Fluid2D::Reset() {
-    // density_.Fill(0.0);
-    // density_tmp_.Fill(0.0);
-    // pressure_.Fill(0.0);
-    // divergence_.Fill(0.0);
-    // vorticity_.Fill(0.0);
+    smoke_density_.Fill(0.0);
+    smoke_density_tmp_.Fill(0.0);
+    temperature_.Fill(config_.ambient_temperature);
+    temperature_tmp_.Fill(config_.ambient_temperature);
+    pressure_.Fill(0.0);
+    divergence_.Fill(0.0);
+    vorticity_.Fill(0.0);
     velocity_.Fill(0.0);
-    // velocity_x_tmp_.Fill(0.0);
-    // velocity_y_tmp_.Fill(0.0);
-    force_.Fill(0.0);
-    // external_force_x_.Fill(0.0);
-    // external_force_y_.Fill(0.0);
-    // time_ = 0.0;
-    // wind_phase_ = 0.0;
-    // step_count_ = 0;
-    // last_pressure_iterations_ = 0;
-    // last_pressure_residual_ = 0.0;
+    velocity_tmp_.Fill(0.0);
 
-    // if (_config.source_enabled) {
-    //     ApplyConfiguredSource();
-    // }
+    time_ = 0.0;
+    step_count_ = 0;
+    last_pressure_iterations_ = 0;
+    last_pressure_residual_ = 0.0;
 }
 
 void Fluid2D::Step() {
     Step(config_.time_step);
 }
 
-void Fluid2D::Step(double dt) {
+void Fluid2D::Step(Real dt) {
     if (dt <= 0.0) {
         return;
     }
 
     const int substeps = ComputeSubstepCount_(dt);
-    const double substep_dt = dt / static_cast<double>(substeps);
+    const Real substep_dt = dt / static_cast<Real>(substeps);
 
     for (int substep = 0; substep < substeps; ++substep) {
-        // if (config_.source_enabled) {
-        //     ApplyConfiguredSource();
-        // }
+        // Advect with the divergence-free velocity from the previous substep.
+        AdvectVelocity_(substep_dt);
 
-        force_.Fill(0.0);
+        // Body(External) forces and sources are applied before projection 
+        // so that they affect the velocity field used for advection. 
+        ApplyConfiguredVelocitySource_(substep_dt);
+        ApplyBuoyancy_(substep_dt);
 
-        // ApplyBuoyancy();
-        // if (_config.wind_enabled) {
-        //     ApplyWind();
-        // }
+        if (config_.vorticity_confinement > 0.0) {
+            ComputeVorticity_();
+            ApplyVorticityConfinement_(substep_dt);
+        }
 
-        // ComputeVorticityField();
-        // ApplyVorticityConfinement();
-        // ApplyAccumulatedForces(substep_dt);
-        // DiffuseVelocity(substep_dt);
-        // SolvePressureProjection(substep_dt);
-        // AdvectFields(substep_dt);
-        // ComputeVorticityField();
+        // Pressure projection makes the velocity field divergence-free(incompressible)
+        SetBoundaryConditions_();
+        ProjectVelocity_(substep_dt);
+
+        // Advect smoke and temperature with the updated divergence-free velocity field.
+        AdvectScalars_(substep_dt);
+        ApplyConfiguredScalarSource_(substep_dt);
 
         time_ += substep_dt;
     }
 
-    // ClearForces();
     ++step_count_;
 }
 
-void Fluid2D::InitializeFromConfig_() {
-    assert(config_.resolution_x > 0 && config_.resolution_y > 0);
+void Fluid2D::AddSmokeSourceNormalized_(
+    Real min_x,
+    Real max_x,
+    Real min_y,
+    Real max_y,
+    Real smoke_rate,
+    Real target_temperature,
+    Real temperature_rate,
+    Real dt) {
 
-    inverse_cell_size_ = 1.0 / config_.cell_size;
-
-    if (config_.time_step <= 0.0) {
-        config_.time_step = std::max(1e-6, config_.cfl_number * config_.cell_size); // time_step <= cfl_number * cell_size / max_speed (max_speed=1.0)
-    }
-
-    // density_.Resize(_config.resolution_x, _config.resolution_y, 0.0);
-    // density_tmp_.Resize(_config.resolution_x, _config.resolution_y, 0.0);
-    // pressure_.Resize(_config.resolution_x, _config.resolution_y, 0.0);
-    // divergence_.Resize(_config.resolution_x, _config.resolution_y, 0.0);
-    // vorticity_.Resize(_config.resolution_x, _config.resolution_y, 0.0);
-    velocity_.Resize(config_.resolution_x + 1, config_.resolution_y, 0.0);
-    // velocity_x_tmp_.Resize(config_.resolution_x + 1, config_.resolution_y, 0.0);
-    // velocity_y_tmp_.Resize(config_.resolution_x, config_.resolution_y + 1, 0.0);
-    force_.Resize(config_.resolution_x + 1, config_.resolution_y, 0.0);
-    // external_force_y_.Resize(_config.resolution_x, _config.resolution_y + 1, 0.0);
-}
-
-int Fluid2D::ComputeSubstepCount_(double dt) const {
-    const double max_speed = ComputeMaxSpeed_();
-    if (max_speed <= 0.0) {
-        return 1;
-    }
-
-    // time_step <= cfl_number * cell_size / max_speed
-    const double max_dt = config_.cfl_number * config_.cell_size / max_speed;
-    const int count = static_cast<int>(std::ceil(dt / max_dt));
-    return std::clamp(count, 1, config_.max_substeps);
-}
-
-double Fluid2D::ComputeMaxSpeed_() const {
-    double max_speed = 0.0;
-    for (double v : velocity_.UData()) {
-        max_speed = std::max(max_speed, std::abs(v));
-    }
-    for (double v : velocity_.VData()) {
-        max_speed = std::max(max_speed, std::abs(v));
-    }
-    return max_speed;
-}
-
-void Fluid2D::AdvectFields_(double dt) {
-    SemiLagrangianBackwards_(dt, config_.semi_lagrangian_substeps);
+    assert (min_x >= 0.0 && min_x < max_x && max_x <= 1.0);
+    assert (min_y >= 0.0 && min_y < max_y && max_y <= 1.0);
+    assert (temperature_rate >= 0.0);
     
+    const int x_begin = static_cast<int>(std::floor(min_x * config_.resolution_x));
+    const int x_end = static_cast<int>(std::ceil(max_x * config_.resolution_x));
 
-    // for (int y = 0; y < config_.resolution_y; ++y) {
-    //     for (int x = 0; x < config_.resolution_x; ++x) {
-    //         const double nx = safeNormalizeCenter(x, config_.resolution_x);
-    //         const double ny = safeNormalizeCenter(y, config_.resolution_y);
-    //         const Vector2D velocity = SampleVelocityAtCenterCoords(nx, ny);
-    //         const double back_x = clampValue(nx - velocity.x * dt / config_.domain_size_x, 0.0, 1.0);
-    //         const double back_y = clampValue(ny - velocity.y * dt / config_.domain_size_y, 0.0, 1.0);
-    //         density_tmp_(x, y) = SampleDensityAtCenterCoords(back_x, back_y);
-    //     }
-    // }
-    // density_.Data() = density_tmp_.Data();
+    const int y_begin = static_cast<int>(std::floor(min_y * config_.resolution_y));
+    const int y_end = static_cast<int>(std::ceil(max_y * config_.resolution_y));
 
-    // for (int y = 0; y < velocity_x_.Height(); ++y) {
-    //     for (int x = 0; x < velocity_x_.Width(); ++x) {
-    //         const double nx = safeNormalizeX(x, _config.resolution_x);
-    //         const double ny = safeNormalizeCenter(y, _config.resolution_y);
-    //         const Vector2D velocity = SampleVelocityAtUFaceCoords(nx, ny);
-    //         const double back_x = clampValue(nx - velocity.x * dt / _config.domain_size_x, 0.0, 1.0);
-    //         const double back_y = clampValue(ny - velocity.y * dt / _config.domain_size_y, 0.0, 1.0);
-    //         velocity_x_tmp_(x, y) = SampleUAtCenterCoords(back_x, back_y);
-    //     }
-    // }
-    // velocity_x_.Data() = velocity_x_tmp_.Data();
+    const int width = x_end - x_begin;
+    const int height = y_end - y_begin;
 
-    // for (int y = 0; y < velocity_y_.Height(); ++y) {
-    //     for (int x = 0; x < velocity_y_.Width(); ++x) {
-    //         const double nx = safeNormalizeCenter(x, _config.resolution_x);
-    //         const double ny = safeNormalizeX(y, _config.resolution_y);
-    //         const Vector2D velocity = SampleVelocityAtVFaceCoords(nx, ny);
-    //         const double back_x = clampValue(nx - velocity.x * dt / _config.domain_size_x, 0.0, 1.0);
-    //         const double back_y = clampValue(ny - velocity.y * dt / _config.domain_size_y, 0.0, 1.0);
-    //         velocity_y_tmp_(x, y) = SampleVAtCenterCoords(back_x, back_y);
-    //     }
-    // }
-    // velocity_y_.Data() = velocity_y_tmp_.Data();
-
-    // SetBoundaryConditions();
+    auto smoke = smoke_density_.Data().block(x_begin, y_begin, width, height);
+    smoke = (smoke + smoke_rate * dt).min(config_.max_smoke_density).max(0.0);
+    
+    const Real heat_alpha = 1.0 - std::exp(-std::max(0.0, temperature_rate) * dt);
+    auto temperature = temperature_.Data().block(x_begin, y_begin, width, height);
+    temperature += heat_alpha * (target_temperature - temperature);
 }
 
-void Fluid2D::SemiLagrangianBackwards_(double dt, int substeps) {
-    const double substep_dt = dt / static_cast<double>(substeps);
+void Fluid2D::AddVelocityImpulseNormalized_(
+    Real min_x,
+    Real max_x,
+    Real min_y,
+    Real max_y,
+    Vector2D acceleration,
+    Real dt) {
+    assert (min_x >= 0.0 && min_x < max_x && max_x <= 1.0);
+    assert (min_y >= 0.0 && min_y < max_y && max_y <= 1.0);
     
-    int width = config_.resolution_x;
-    int height = config_.resolution_y;
-    for (int j = 0; j < height; ++j) {
-        for (int i = 0; i < width; ++i) {
-            semi_lagrangian_position_.U(i, j) = static_cast<double>(i) + 0.5;
-            semi_lagrangian_position_.V(i, j) = static_cast<double>(j) + 0.5;
+    const Real width = static_cast<Real>(config_.resolution_x) * config_.cell_size;
+    const Real height = static_cast<Real>(config_.resolution_y) * config_.cell_size;
+    const Real velocity_delta_x = acceleration.x() * dt * width;
+    const Real velocity_delta_y = acceleration.y() * dt * height;
+
+    for (int x = 0; x < velocity_.UWidth(); ++x) {
+        for (int y = 0; y < velocity_.UHeight(); ++y) {
+            const Real py = (static_cast<Real>(y) + 0.5)  / static_cast<Real>(config_.resolution_y);
+            if (py < min_y || py > max_y) {
+                continue;
+            }
+
+            const Real px = static_cast<Real>(x) / static_cast<Real>(config_.resolution_x);
+            if (px >= min_x && px <= max_x) {
+                velocity_.U(x, y) += velocity_delta_x;
+            }
         }
     }
-    
-    for (int step = 0; step < substeps; ++step) {
-        for (int j = 0; j < height; ++j) {
-            for (int i = 0; i < width; ++i) {
-                const double x = semi_lagrangian_position_.U(i, j);
-                const double y = semi_lagrangian_position_.V(i, j);
-                const Vector2D velocity = velocity_.Sample(x, y);
-                semi_lagrangian_position_.U(i, j) = x - velocity.x * substep_dt * inverse_cell_size_;
-                semi_lagrangian_position_.V(i, j) = y - velocity.y * substep_dt * inverse_cell_size_;
+
+    for (int x = 0; x < velocity_.VWidth(); ++x) {
+        for (int y = 0; y < velocity_.VHeight(); ++y) {
+            const Real py = static_cast<Real>(y) / static_cast<Real>(config_.resolution_y);
+            if (py < min_y || py > max_y) {
+                continue;
+            }
+
+            const Real px = (static_cast<Real>(x) + 0.5) / static_cast<Real>(config_.resolution_x);
+            if (px >= min_x && px <= max_x) {
+                velocity_.V(x, y) += velocity_delta_y;
             }
         }
     }
 }
 
-// namespace {
-
-// double clampValue(double value, double min_value, double max_value) {
-//     return std::max(min_value, std::min(value, max_value));
-// }
-
-// int clampIndex(int value, int min_value, int max_value) {
-//     return std::max(min_value, std::min(value, max_value));
-// }
-
-// std::pair<int, int> normalizedIndexRange(
-//     double min_normalized,
-//     double max_normalized,
-//     int resolution) {
-//     const double start_normalized = clampValue(std::min(min_normalized, max_normalized), 0.0, 1.0);
-//     const double end_normalized = clampValue(std::max(min_normalized, max_normalized), 0.0, 1.0);
-
-//     const int start_index = clampIndex(
-//         static_cast<int>(std::floor(start_normalized * resolution)), 0, resolution - 1);
-//     const int end_index = clampIndex(
-//         static_cast<int>(std::ceil(end_normalized * resolution)), 0, resolution);
-
-//     return {start_index, end_index};
-// }
-
-// double safeNormalizeX(int x, int resolution_x) {
-//     return static_cast<double>(x) / static_cast<double>(std::max(resolution_x, 1));
-// }
-
-// double safeNormalizeCenter(int index, int resolution) {
-//     return (static_cast<double>(index) + 0.5) / static_cast<double>(std::max(resolution, 1));
-// }
-
-// double sampleClamped(const MACScalarGrid2D& grid, double x, double y) {
-//     return grid.Sample(clampValue(x, 0.0, static_cast<double>(grid.Width() - 1)),
-//                        clampValue(y, 0.0, static_cast<double>(grid.Height() - 1)));
-// }
-
-// }  // namespace
-
-
-// void Fluid2D::AddDensitySource(
-//     double min_x,
-//     double max_x,
-//     double min_y,
-//     double max_y,
-//     double density) {
-//     const auto [start_x, end_x] = normalizedIndexRange(min_x, max_x, _config.resolution_x);
-//     const auto [start_y, end_y] = normalizedIndexRange(min_y, max_y, _config.resolution_y);
-
-//     for (int y = start_y; y < end_y; ++y) {
-//         for (int x = start_x; x < end_x; ++x) {
-//             density_(x, y) = std::max(density_(x, y), density);
-//         }
-//     }
-// }
-
-// void Fluid2D::AddForce(
-//     double min_x,
-//     double max_x,
-//     double min_y,
-//     double max_y,
-//     double force_x,
-//     double force_y) {
-//     const double x0 = clampValue(std::min(min_x, max_x), 0.0, 1.0);
-//     const double x1 = clampValue(std::max(min_x, max_x), 0.0, 1.0);
-//     const double y0 = clampValue(std::min(min_y, max_y), 0.0, 1.0);
-//     const double y1 = clampValue(std::max(min_y, max_y), 0.0, 1.0);
-
-//     for (int y = 0; y < external_force_x_.Height(); ++y) {
-//         const double py = safeNormalizeCenter(y, _config.resolution_y);
-//         if (py < y0 || py > y1) {
-//             continue;
-//         }
-
-//         for (int x = 0; x < external_force_x_.Width(); ++x) {
-//             const double px = safeNormalizeX(x, _config.resolution_x);
-//             if (px >= x0 && px <= x1) {
-//                 external_force_x_(x, y) += force_x;
-//             }
-//         }
-//     }
-
-//     for (int y = 0; y < external_force_y_.Height(); ++y) {
-//         const double py = safeNormalizeX(y, _config.resolution_y);
-//         if (py < y0 || py > y1) {
-//             continue;
-//         }
-
-//         for (int x = 0; x < external_force_y_.Width(); ++x) {
-//             const double px = safeNormalizeCenter(x, _config.resolution_x);
-//             if (px >= x0 && px <= x1) {
-//                 external_force_y_(x, y) += force_y;
-//             }
-//         }
-//     }
-// }
-
-// void Fluid2D::ClearDensity() {
-//     density_.Fill(0.0);
-//     density_tmp_.Fill(0.0);
-// }
-
-// void Fluid2D::ClearForces() {
-//     external_force_x_.Fill(0.0);
-//     external_force_y_.Fill(0.0);
-//     force_x_.Fill(0.0);
-//     force_y_.Fill(0.0);
-// }
-
-// int Fluid2D::ResolutionX() const noexcept {
-//     return _config.resolution_x;
-// }
-
-// int Fluid2D::ResolutionY() const noexcept {
-//     return _config.resolution_y;
-// }
-
-// double Fluid2D::CellSize() const noexcept {
-//     return cell_size_;
-// }
-
-// double Fluid2D::InverseCellSize() const noexcept {
-//     return inverse_cell_size_;
-// }
-
-// double Fluid2D::DomainSizeX() const noexcept {
-//     return _config.domain_size_x;
-// }
-
-// double Fluid2D::DomainSizeY() const noexcept {
-//     return _config.domain_size_y;
-// }
-
-// void Fluid2D::ApplyConfiguredSource() {
-//     AddDensitySource(
-//         _config.source_min_x,
-//         _config.source_max_x,
-//         _config.source_min_y,
-//         _config.source_max_y,
-//         _config.source_density);
-
-//     AddForce(
-//         _config.source_min_x,
-//         _config.source_max_x,
-//         _config.source_min_y,
-//         _config.source_max_y,
-//         0.0,
-//         _config.buoyancy);
-// }
-
-// void Fluid2D::ApplyBuoyancy() {
-//     for (int y = 0; y < velocity_y_.Height(); ++y) {
-//         const double py = safeNormalizeX(y, _config.resolution_y);
-//         for (int x = 0; x < velocity_y_.Width(); ++x) {
-//             const double px = safeNormalizeCenter(x, _config.resolution_x);
-//             const double density_sample = SampleDensityAtCenterCoords(px, py);
-//             force_y_(x, y) += _config.buoyancy * density_sample;
-//         }
-//     }
-// }
-
-// void Fluid2D::ApplyWind() {
-//     for (int y = 0; y < velocity_x_.Height(); ++y) {
-//         for (int x = 0; x < velocity_x_.Width(); ++x) {
-//             force_x_(x, y) += _config.wind_strength;
-//         }
-//     }
-// }
-
-// void Fluid2D::ApplyVorticityConfinement() {
-//     const int w = _config.resolution_x;
-//     const int h = _config.resolution_y;
-
-//     for (int y = 1; y < h - 1; ++y) {
-//         for (int x = 1; x < w - 1; ++x) {
-//             const double dwdx = (std::abs(vorticity_(x + 1, y)) - std::abs(vorticity_(x - 1, y))) * 0.5 * inverse_cell_size_;
-//             const double dwdy = (std::abs(vorticity_(x, y + 1)) - std::abs(vorticity_(x, y - 1))) * 0.5 * inverse_cell_size_;
-//             const double length = std::sqrt(dwdx * dwdx + dwdy * dwdy) + 1e-9;
-//             const double nx = dwdx / length;
-//             const double ny = dwdy / length;
-//             const double vortex = vorticity_(x, y);
-
-//             const double force_x = _config.vorticity_confinement * (ny * vortex);
-//             const double force_y = _config.vorticity_confinement * (-nx * vortex);
-
-//             const int iu = std::clamp(x, 0, velocity_x_.Width() - 1);
-//             const int iv = std::clamp(x, 0, velocity_y_.Width() - 1);
-//             const int ju = std::clamp(y, 0, velocity_x_.Height() - 1);
-//             const int jv = std::clamp(y, 0, velocity_y_.Height() - 1);
-
-//             force_x_(iu, ju) += force_x;
-//             force_y_(iv, jv) += force_y;
-//         }
-//     }
-// }
-
-// void Fluid2D::ApplyAccumulatedForces(double dt) {
-//     const double scale = dt;
-
-//     for (int y = 0; y < velocity_x_.Height(); ++y) {
-//         for (int x = 0; x < velocity_x_.Width(); ++x) {
-//             velocity_x_(x, y) += scale * (force_x_(x, y) + external_force_x_(x, y));
-//         }
-//     }
-
-//     for (int y = 0; y < velocity_y_.Height(); ++y) {
-//         for (int x = 0; x < velocity_y_.Width(); ++x) {
-//             velocity_y_(x, y) += scale * (force_y_(x, y) + external_force_y_(x, y));
-//         }
-//     }
-// }
-
-// void Fluid2D::DiffuseVelocity(double dt) {
-//     if (_config.viscosity <= 0.0) {
-//         return;
-//     }
-
-//     const double alpha = _config.viscosity * dt * inverse_cell_size_ * inverse_cell_size_;
-//     const double inv_coefficient = 1.0 / (1.0 + 4.0 * alpha);
-
-//     auto diffuseGrid = [&](MACScalarGrid2D& field, MACScalarGrid2D& scratch) {
-//         for (int iter = 0; iter < _config.diffusion_iterations; ++iter) {
-//             for (int y = 1; y < field.Height() - 1; ++y) {
-//                 for (int x = 1; x < field.Width() - 1; ++x) {
-//                     const double sum_neighbors = field(x - 1, y) + field(x + 1, y) + field(x, y - 1) + field(x, y + 1);
-//                     scratch(x, y) = (field(x, y) + alpha * sum_neighbors) * inv_coefficient;
-//                 }
-//             }
-
-//             for (int y = 1; y < field.Height() - 1; ++y) {
-//                 for (int x = 1; x < field.Width() - 1; ++x) {
-//                     field(x, y) = scratch(x, y);
-//                 }
-//             }
-//             SetBoundaryConditions();
-//         }
-//     };
-
-//     diffuseGrid(velocity_x_, velocity_x_tmp_);
-//     diffuseGrid(velocity_y_, velocity_y_tmp_);
-// }
-
-// void Fluid2D::SolvePressureProjection(double dt) {
-//     SetBoundaryConditions();
-//     ComputeDivergenceField();
-
-//     pressure_.Fill(0.0);
-//     SolvePoisson(dt);
-//     CorrectVelocity(dt);
-//     SetBoundaryConditions();
-// }
-
-// void Fluid2D::SetBoundaryConditions() {
-//     const int ux = velocity_x_.Width();
-//     const int uy = velocity_x_.Height();
-//     for (int y = 0; y < uy; ++y) {
-//         velocity_x_(0, y) = 0.0;
-//         velocity_x_(ux - 1, y) = 0.0;
-//     }
-
-//     const int vx = velocity_y_.Width();
-//     const int vy = velocity_y_.Height();
-//     for (int x = 0; x < vx; ++x) {
-//         velocity_y_(x, 0) = 0.0;
-//         velocity_y_(x, vy - 1) = 0.0;
-//     }
-
-//     for (int x = 0; x < pressure_.Width(); ++x) {
-//         pressure_(x, 0) = 0.0;
-//         pressure_(x, pressure_.Height() - 1) = 0.0;
-//     }
-//     for (int y = 0; y < pressure_.Height(); ++y) {
-//         pressure_(0, y) = 0.0;
-//         pressure_(pressure_.Width() - 1, y) = 0.0;
-//     }
-// }
-
-// void Fluid2D::ComputeDivergenceField() {
-//     for (int y = 0; y < _config.resolution_y; ++y) {
-//         for (int x = 0; x < _config.resolution_x; ++x) {
-//             const double du = velocity_x_(x + 1, y) - velocity_x_(x, y);
-//             const double dv = velocity_y_(x, y + 1) - velocity_y_(x, y);
-//             divergence_(x, y) = (du + dv) * inverse_cell_size_;
-//         }
-//     }
-// }
-
-// void Fluid2D::SolvePoisson(double dt) {
-//     const double alpha = cell_size_ * cell_size_ / dt;
-//     const int w = pressure_.Width();
-//     const int h = pressure_.Height();
-
-//     for (int iter = 0; iter < _config.pressure_iterations; ++iter) {
-//         double max_change = 0.0;
-
-//         for (int y = 1; y < h - 1; ++y) {
-//             for (int x = 1; x < w - 1; ++x) {
-//                 const double sum_neighbors = pressure_(x - 1, y) + pressure_(x + 1, y) + pressure_(x, y - 1) + pressure_(x, y + 1);
-//                 const double new_pressure = (sum_neighbors - alpha * divergence_(x, y)) * 0.25;
-//                 const double change = std::abs(new_pressure - pressure_(x, y));
-//                 pressure_(x, y) = new_pressure;
-//                 max_change = std::max(max_change, change);
-//             }
-//         }
-
-//         SetBoundaryConditions();
-//         if (max_change < _config.pressure_tolerance) {
-//             last_pressure_iterations_ = iter + 1;
-//             last_pressure_residual_ = max_change;
-//             return;
-//         }
-//     }
-
-//     last_pressure_iterations_ = _config.pressure_iterations;
-//     last_pressure_residual_ = 0.0;
-// }
-
-// void Fluid2D::CorrectVelocity(double dt) {
-//     const double scale = dt * inverse_cell_size_;
-
-//     for (int y = 0; y < velocity_x_.Height(); ++y) {
-//         for (int x = 1; x < velocity_x_.Width() - 1; ++x) {
-//             const double p_left = PressureAtWithNeumann(x - 1, y);
-//             const double p_right = PressureAtWithNeumann(x, y);
-//             velocity_x_(x, y) -= scale * (p_right - p_left);
-//         }
-//     }
-
-//     for (int y = 1; y < velocity_y_.Height() - 1; ++y) {
-//         for (int x = 0; x < velocity_y_.Width(); ++x) {
-//             const double p_down = PressureAtWithNeumann(x, y - 1);
-//             const double p_up = PressureAtWithNeumann(x, y);
-//             velocity_y_(x, y) -= scale * (p_up - p_down);
-//         }
-//     }
-// }
-
-// void Fluid2D::ComputeVorticityField() {
-//     for (int y = 0; y < _config.resolution_y; ++y) {
-//         for (int x = 0; x < _config.resolution_x; ++x) {
-//             if (x == _config.resolution_x - 1 || y == _config.resolution_y - 1) {
-//                 vorticity_(x, y) = 0.0;
-//                 continue;
-//             }
-
-//             const double du_dy = (velocity_x_(x, y + 1) - velocity_x_(x, y)) * inverse_cell_size_;
-//             const double dv_dx = (velocity_y_(x + 1, y) - velocity_y_(x, y)) * inverse_cell_size_;
-//             vorticity_(x, y) = dv_dx - du_dy;
-//         }
-//     }
-// }
-
-
-
-
-
-
-
-// double Fluid2D::SampleDensityAtCenterCoords(double x, double y) const {
-//     const double grid_x = x * static_cast<double>(_config.resolution_x) - 0.5;
-//     const double grid_y = y * static_cast<double>(_config.resolution_y) - 0.5;
-//     return sampleClamped(density_, grid_x, grid_y);
-// }
-
-// double Fluid2D::SampleUAtCenterCoords(double x, double y) const {
-//     const double grid_x = x * static_cast<double>(_config.resolution_x);
-//     const double grid_y = y * static_cast<double>(_config.resolution_y) - 0.5;
-//     return sampleClamped(velocity_x_, grid_x, grid_y);
-// }
-
-// double Fluid2D::SampleVAtCenterCoords(double x, double y) const {
-//     const double grid_x = x * static_cast<double>(_config.resolution_x) - 0.5;
-//     const double grid_y = y * static_cast<double>(_config.resolution_y);
-//     return sampleClamped(velocity_y_, grid_x, grid_y);
-// }
-
-// Vector2D Fluid2D::SampleVelocityAtCenterCoords(double x, double y) const {
-//     return {
-//         SampleUAtCenterCoords(x, y),
-//         SampleVAtCenterCoords(x, y)
-//     };
-// }
-
-// Vector2D Fluid2D::SampleVelocityAtUFaceCoords(double x, double y) const {
-//     return {SampleUAtCenterCoords(x, y), SampleVAtCenterCoords(x, y)};
-// }
-
-// Vector2D Fluid2D::SampleVelocityAtVFaceCoords(double x, double y) const {
-//     return {SampleUAtCenterCoords(x, y), SampleVAtCenterCoords(x, y)};
-// }
-
-// double Fluid2D::PressureAtWithNeumann(int x, int y) const {
-//     const int clamped_x = std::clamp(x, 0, pressure_.Width() - 1);
-//     const int clamped_y = std::clamp(y, 0, pressure_.Height() - 1);
-//     return pressure_(clamped_x, clamped_y);
-// }
-
-// double Fluid2D::TimeStep() const noexcept {
-//     return _config.time_step;
-// }
-
-// double Fluid2D::Time() const noexcept {
-//     return time_;
-// }
-
-// int Fluid2D::StepCount() const noexcept {
-//     return step_count_;
-// }
-
-// int Fluid2D::LastPressureIterations() const noexcept {
-//     return last_pressure_iterations_;
-// }
-
-// double Fluid2D::LastPressureResidual() const noexcept {
-//     return last_pressure_residual_;
-// }
-
-// Vector2D Fluid2D::SampleVelocityNormalized(double x, double y) const {
-//     const double clamped_x = clampValue(x, 0.0, 1.0);
-//     const double clamped_y = clampValue(y, 0.0, 1.0);
-//     return SampleVelocityAtCenterCoords(clamped_x, clamped_y);
-// }
-
-// double Fluid2D::SampleDensityNormalized(double x, double y) const {
-//     const double clamped_x = clampValue(x, 0.0, 1.0);
-//     const double clamped_y = clampValue(y, 0.0, 1.0);
-//     return SampleDensityAtCenterCoords(clamped_x, clamped_y);
-// }
-
-// const Fluid2D::Config& Fluid2D::Configs() const noexcept {
-//     return _config;
-// }
-
-// Fluid2D::Config& Fluid2D::Configs() noexcept {
-//     return _config;
-// }
-
-// const MACScalarGrid2D& Fluid2D::Density() const noexcept {
-//     return density_;
-// }
-
-// const MACScalarGrid2D& Fluid2D::Pressure() const noexcept {
-//     return pressure_;
-// }
-
-// const MACScalarGrid2D& Fluid2D::Divergence() const noexcept {
-//     return divergence_;
-// }
-
-// const MACScalarGrid2D& Fluid2D::Vorticity() const noexcept {
-//     return vorticity_;
-// }
-
-// const MACScalarGrid2D& Fluid2D::VelocityX() const noexcept {
-//     return velocity_x_;
-// }
-
-// const MACScalarGrid2D& Fluid2D::VelocityY() const noexcept {
-//     return velocity_y_;
-// }
+int Fluid2D::ResolutionX() const noexcept {
+    return config_.resolution_x;
+}
+
+int Fluid2D::ResolutionY() const noexcept {
+    return config_.resolution_y;
+}
+
+Real Fluid2D::CellSize() const noexcept {
+    return config_.cell_size;
+}
+
+Real Fluid2D::TimeStep() const noexcept {
+    return config_.time_step;
+}
+
+Real Fluid2D::Time() const noexcept {
+    return time_;
+}
+
+int Fluid2D::StepCount() const noexcept {
+    return step_count_;
+}
+
+int Fluid2D::LastPressureIterations() const noexcept {
+    return last_pressure_iterations_;
+}
+
+Real Fluid2D::LastPressureResidual() const noexcept {
+    return last_pressure_residual_;
+}
+
+Real Fluid2D::SampleSmokeNormalized(Real x, Real y) const {
+    const Real world_x = Clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
+    const Real world_y = Clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
+    return SampleScalarWorld_(smoke_density_, world_x, world_y);
+}
+
+Real Fluid2D::SampleTemperatureNormalized(Real x, Real y) const {
+    const Real world_x = Clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
+    const Real world_y = Clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
+    return SampleScalarWorld_(temperature_, world_x, world_y);
+}
+
+Vector2D Fluid2D::SampleVelocityNormalized(Real x, Real y) const {
+    const Real world_x = Clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
+    const Real world_y = Clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
+    return SampleVelocityWorld_(velocity_, world_x, world_y);
+}
+
+const Fluid2D::Config& Fluid2D::Configs() const noexcept {
+    return config_;
+}
+
+Fluid2D::Config& Fluid2D::Configs() noexcept {
+    return config_;
+}
+
+const CellCenteredScalarGrid2D& Fluid2D::SmokeDensity() const noexcept {
+    return smoke_density_;
+}
+
+const CellCenteredScalarGrid2D& Fluid2D::Temperature() const noexcept {
+    return temperature_;
+}
+
+const CellCenteredScalarGrid2D& Fluid2D::Pressure() const noexcept {
+    return pressure_;
+}
+
+const CellCenteredScalarGrid2D& Fluid2D::Divergence() const noexcept {
+    return divergence_;
+}
+
+const CellCenteredScalarGrid2D& Fluid2D::Vorticity() const noexcept {
+    return vorticity_;
+}
+
+const FaceCenteredVectorGrid2D& Fluid2D::Velocity() const noexcept {
+    return velocity_;
+}
+
+void Fluid2D::InitializeFromConfig_() {
+    assert (config_.numeric_epsilon > 0.0);
+    
+    assert (config_.resolution_x > 0 && config_.resolution_y > 0);
+    assert (config_.cell_size > 0.0);
+
+    assert (config_.time_step > 0.0);
+    assert (config_.max_substeps > 0);
+    assert (config_.cfl_number >= 1.0 && config_.cfl_number <= 10.0);
+    
+    assert (config_.fluid_density > 0.0);
+    assert (config_.pressure_iterations > 0);
+    assert (config_.pressure_tolerance > 0.0);
+
+    assert (config_.buoyancy_smoke_density_coefficient > 0.0);
+    assert (config_.buoyancy_temperature_coefficient > 0.0);
+
+    assert (config_.max_smoke_density > 0.0);
+    
+    assert (config_.source_min_x >= 0.0 && 
+            config_.source_min_x < config_.source_max_x && 
+            config_.source_max_x <= 1.0);
+    assert (config_.source_min_y >= 0.0 && 
+            config_.source_min_y < config_.source_max_y && 
+            config_.source_max_y <= 1.0);
+    assert (config_.source_temperature_rate >= 0.0);
+
+    inverse_cell_size_ = 1.0 / config_.cell_size;
+
+    smoke_density_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+    smoke_density_tmp_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+    temperature_.Resize(config_.resolution_x, config_.resolution_y, config_.ambient_temperature);
+    temperature_tmp_.Resize(config_.resolution_x, config_.resolution_y, config_.ambient_temperature);
+    pressure_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+    divergence_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+    vorticity_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+    velocity_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+    velocity_tmp_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+}
+
+int Fluid2D::ComputeSubstepCount_(Real dt) const {
+    const Real max_speed = ComputeMaxSpeed_();
+    if (max_speed <= config_.numeric_epsilon) {
+        return 1;
+    }
+
+    const Real max_dt = config_.cfl_number * config_.cell_size / max_speed;
+    const int count = static_cast<int>(std::ceil(dt / std::max(max_dt, config_.numeric_epsilon)));
+    return std::clamp(count, 1, config_.max_substeps);
+}
+
+Real Fluid2D::ComputeMaxSpeed_() const {
+    const Real max_u = velocity_.UData().abs().maxCoeff();
+    const Real max_v = velocity_.VData().abs().maxCoeff();
+    return std::max(max_u, max_v);
+}
+
+void Fluid2D::ApplyConfiguredScalarSource_(Real dt) {
+    if (!config_.source_enabled) {
+        return;
+    }
+
+    AddSmokeSourceNormalized_(
+        config_.source_min_x,
+        config_.source_max_x,
+        config_.source_min_y,
+        config_.source_max_y,
+        config_.source_smoke_rate,
+        config_.source_temperature,
+        config_.source_temperature_rate,
+        dt);
+}
+
+void Fluid2D::ApplyConfiguredVelocitySource_(Real dt) {
+    if (!config_.source_enabled) {
+        return;
+    }
+    
+    AddVelocityImpulseNormalized_(
+        config_.source_min_x,
+        config_.source_max_x,
+        config_.source_min_y,
+        config_.source_max_y,
+        {0.0, config_.source_acceleration_y},
+        dt);
+}
+
+void Fluid2D::ApplyBuoyancy_(Real dt) {
+    const int width = config_.resolution_x;
+    const int interior_height = config_.resolution_y - 1;
+    if (interior_height <= 0) {
+        return;
+    }
+
+    // V samples sit between scalar rows; average neighboring cell-centered
+    // smoke and temperature before applying vertical acceleration.
+    const ScalarArray2D smoke =
+        0.5 * (smoke_density_.Data().block(0, 0, width, interior_height) +
+               smoke_density_.Data().block(0, 1, width, interior_height)).eval();
+    const ScalarArray2D temperature =
+        0.5 * (temperature_.Data().block(0, 0, width, interior_height) +
+               temperature_.Data().block(0, 1, width, interior_height)).eval();
+    velocity_.VData().block(0, 1, width, interior_height) +=
+        (config_.gravity *
+         (config_.buoyancy_temperature_coefficient *
+              (temperature - config_.ambient_temperature) -
+          config_.buoyancy_smoke_density_coefficient * smoke)) *
+        dt;
+}
+
+void Fluid2D::ComputeVorticity_() {
+    const Real inv_dx = inverse_cell_size_;
+    for (int x = 0; x < config_.resolution_x; ++x) {
+        for (int y = 0; y < config_.resolution_y; ++y) {
+            const Real world_x = (static_cast<Real>(x) + 0.5) * config_.cell_size;
+            const Real world_y = (static_cast<Real>(y) + 0.5) * config_.cell_size;
+
+            const Real dv_dx =
+                (SampleVWorld_(velocity_, world_x + 0.5 * config_.cell_size, world_y) -
+                 SampleVWorld_(velocity_, world_x - 0.5 * config_.cell_size, world_y)) *
+                inv_dx;
+            const Real du_dy =
+                (SampleUWorld_(velocity_, world_x, world_y + 0.5 * config_.cell_size) -
+                 SampleUWorld_(velocity_, world_x, world_y - 0.5 * config_.cell_size)) *
+                inv_dx;
+            vorticity_(x, y) = dv_dx - du_dy;
+        }
+    }
+}
+
+void Fluid2D::ApplyVorticityConfinement_(Real dt) {
+    const Real eps = config_.vorticity_confinement;
+    for (int x = 1; x < config_.resolution_x - 1; ++x) {
+        for (int y = 1; y < config_.resolution_y - 1; ++y) {
+            const Real grad_x = 0.5 * (std::abs(vorticity_(x + 1, y)) - std::abs(vorticity_(x - 1, y))) * inverse_cell_size_;
+            const Real grad_y = 0.5 * (std::abs(vorticity_(x, y + 1)) - std::abs(vorticity_(x, y - 1))) * inverse_cell_size_;
+            const Real len = std::sqrt(grad_x * grad_x + grad_y * grad_y);
+            if (len <= config_.numeric_epsilon) {
+                continue;
+            }
+
+            const Real nx = grad_x / len;
+            const Real ny = grad_y / len;
+            const Real curl = vorticity_(x, y);
+            const Real force_x = eps * ny * curl;
+            const Real force_y = -eps * nx * curl;
+
+            velocity_.U(x, y) += force_x * dt;
+            velocity_.U(x + 1, y) += force_x * dt;
+            velocity_.V(x, y) += force_y * dt;
+            velocity_.V(x, y + 1) += force_y * dt;
+        }
+    }
+}
+
+void Fluid2D::AdvectVelocity_(Real dt) {
+    // Semi-Lagrangian advection: trace each face center backward through the
+    // current velocity field, then sample the previous component there.
+    const auto velocity_at = [&](const Vector2D& p) {
+        return SampleVelocityWorld_(velocity_, p.x(), p.y());
+    };
+
+    for (int x = 0; x < velocity_.UWidth(); ++x) {
+        for (int y = 0; y < velocity_.UHeight(); ++y) {
+            const Real world_x = static_cast<Real>(x) * config_.cell_size;
+            const Real world_y = (static_cast<Real>(y) + 0.5) * config_.cell_size;
+            const Vector2D back_position =
+                BacktracePosition2D(config_.advection_integrator, {world_x, world_y}, dt, velocity_at);
+            velocity_tmp_.U(x, y) = SampleUWorld_(velocity_, back_position.x(), back_position.y());
+        }
+    }
+
+    for (int x = 0; x < velocity_.VWidth(); ++x) {
+        for (int y = 0; y < velocity_.VHeight(); ++y) {
+            const Real world_x = (static_cast<Real>(x) + 0.5) * config_.cell_size;
+            const Real world_y = static_cast<Real>(y) * config_.cell_size;
+            const Vector2D back_position =
+                BacktracePosition2D(config_.advection_integrator, {world_x, world_y}, dt, velocity_at);
+            velocity_tmp_.V(x, y) = SampleVWorld_(velocity_, back_position.x(), back_position.y());
+        }
+    }
+
+    velocity_.UData() = velocity_tmp_.UData();
+    velocity_.VData() = velocity_tmp_.VData();
+}
+
+void Fluid2D::AdvectScalars_(Real dt) {
+    const Real smoke_decay = std::exp(-std::max(0.0, config_.smoke_dissipation) * dt);
+    const Real temp_decay = std::exp(-std::max(0.0, config_.temperature_dissipation) * dt);
+    const auto velocity_at = [&](const Vector2D& p) {
+        return SampleVelocityWorld_(velocity_, p.x(), p.y());
+    };
+
+    // Scalars are sampled at cell centers and decayed after advection.
+    for (int x = 0; x < config_.resolution_x; ++x) {
+        for (int y = 0; y < config_.resolution_y; ++y) {
+            const Real world_x = (static_cast<Real>(x) + 0.5) * config_.cell_size;
+            const Real world_y = (static_cast<Real>(y) + 0.5) * config_.cell_size;
+            const Vector2D back_position =
+                BacktracePosition2D(config_.advection_integrator, {world_x, world_y}, dt, velocity_at);
+
+            smoke_density_tmp_(x, y) = Clamp(
+                SampleScalarWorld_(smoke_density_, back_position.x(), back_position.y()) * smoke_decay,
+                0.0,
+                config_.max_smoke_density);
+
+            const Real advected_temp =
+                SampleScalarWorld_(temperature_, back_position.x(), back_position.y());
+            temperature_tmp_(x, y) =
+                config_.ambient_temperature +
+                (advected_temp - config_.ambient_temperature) * temp_decay;
+        }
+    }
+
+    smoke_density_.Data() = smoke_density_tmp_.Data();
+    temperature_.Data() = temperature_tmp_.Data();
+}
+
+void Fluid2D::ProjectVelocity_(Real dt) {
+    if (dt <= 0.0) {
+        return;
+    }
+
+    ComputeDivergence_();
+
+    const int width = config_.resolution_x;
+    const int height = config_.resolution_y;
+    const int cell_count = width * height;
+    const Real scale = dt / (config_.fluid_density * config_.cell_size * config_.cell_size);
+
+    // Build a 5-point Poisson stencil. Pinning cell 0 removes the constant
+    // pressure nullspace.
+    std::vector<Eigen::Triplet<Real>> triplets;
+    triplets.reserve(static_cast<std::size_t>(cell_count) * 5);
+    Eigen::VectorXd rhs(cell_count);
+
+    for (int x = 0; x < width; ++x) {
+        for (int y = 0; y < height; ++y) {
+            const int row = CellIndex(x, y, height);
+            if (row == 0) {
+                // Fix one pressure value to define the pressure reference level.
+                // With closed boundaries, pressure is only determined up to a
+                // constant because velocity correction uses pressure gradients.
+                triplets.emplace_back(row, row, 1.0);
+                rhs(row) = 0.0;
+                continue;
+            }
+
+            rhs(row) = -divergence_(x, y);
+
+            Real diagonal = 0.0;
+            const int offsets[4][2] = {
+                {-1, 0},
+                {1, 0},
+                {0, -1},
+                {0, 1},
+            };
+
+            for (const auto& offset : offsets) {
+                const int nx = x + offset[0];
+                const int ny = y + offset[1];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                    continue;
+                }
+
+                diagonal += scale;
+                const int neighbor = CellIndex(nx, ny, height);
+                if (neighbor != 0) {
+                    triplets.emplace_back(row, neighbor, -scale);
+                }
+            }
+
+            triplets.emplace_back(row, row, diagonal > 0.0 ? diagonal : 1.0);
+        }
+    }
+
+    Eigen::SparseMatrix<Real> matrix(cell_count, cell_count);
+    matrix.setFromTriplets(triplets.begin(), triplets.end());
+    matrix.makeCompressed();
+
+    const PressureSolveResult2D pressure_result = SolvePressurePoisson2D(
+        config_.pressure_solver,
+        matrix,
+        rhs,
+        config_.pressure_iterations,
+        config_.pressure_tolerance);
+
+    if (!pressure_result.success) {
+        last_pressure_iterations_ = 0;
+        last_pressure_residual_ = std::numeric_limits<Real>::infinity();
+        pressure_.Fill(0.0);
+        return;
+    }
+
+    const Real max_pressure = pressure_result.solution.cwiseAbs().maxCoeff();
+    const Real pressure_limit =
+        std::max<Real>(1.0, rhs.cwiseAbs().maxCoeff()) * 1.0e6;
+    if (!pressure_result.solution.allFinite() || max_pressure > pressure_limit) {
+        last_pressure_iterations_ = pressure_result.iterations;
+        last_pressure_residual_ = std::numeric_limits<Real>::infinity();
+        pressure_.Fill(0.0);
+        return;
+    }
+
+    last_pressure_iterations_ = pressure_result.iterations;
+    last_pressure_residual_ = pressure_result.residual;
+
+    for (int x = 0; x < width; ++x) {
+        for (int y = 0; y < height; ++y) {
+            pressure_(x, y) = pressure_result.solution(CellIndex(x, y, height));
+        }
+    }
+
+    const ScalarArray2D velocity_u_before_projection = velocity_.UData();
+    const ScalarArray2D velocity_v_before_projection = velocity_.VData();
+    const Real grad_scale = dt / (config_.fluid_density * config_.cell_size);
+    // Subtract pressure gradients on interior faces, then clamp boundaries.
+    velocity_.UData().block(1, 0, width - 1, height) -=
+        grad_scale *
+        (pressure_.Data().block(1, 0, width - 1, height) -
+         pressure_.Data().block(0, 0, width - 1, height));
+    velocity_.VData().block(0, 1, width, height - 1) -=
+        grad_scale *
+        (pressure_.Data().block(0, 1, width, height - 1) -
+         pressure_.Data().block(0, 0, width, height - 1));
+
+    SetBoundaryConditions_();
+    ComputeDivergence_();
+
+    const Real max_velocity_after_projection =
+        std::max(velocity_.UData().abs().maxCoeff(), velocity_.VData().abs().maxCoeff());
+    if (!std::isfinite(max_velocity_after_projection) || max_velocity_after_projection > 1.0e6) {
+        velocity_.UData() = velocity_u_before_projection;
+        velocity_.VData() = velocity_v_before_projection;
+        pressure_.Fill(0.0);
+        last_pressure_residual_ = std::numeric_limits<Real>::infinity();
+        SetBoundaryConditions_();
+        ComputeDivergence_();
+    }
+}
+
+void Fluid2D::SetBoundaryConditions_() {
+    velocity_.UData().row(0).setZero();
+    velocity_.UData().row(velocity_.UWidth() - 1).setZero();
+    velocity_.VData().col(0).setZero();
+    velocity_.VData().col(velocity_.VHeight() - 1).setZero();
+}
+
+void Fluid2D::ComputeDivergence_() {
+    const int width = config_.resolution_x;
+    const int height = config_.resolution_y;
+    divergence_.Data() =
+        (velocity_.UData().block(1, 0, width, height) -
+         velocity_.UData().block(0, 0, width, height) +
+         velocity_.VData().block(0, 1, width, height) -
+         velocity_.VData().block(0, 0, width, height)) *
+        inverse_cell_size_;
+}
+
+Real Fluid2D::SampleScalarWorld_(const CellCenteredScalarGrid2D& grid, Real x, Real y) const {
+    // World-space cell center (i + 0.5) * dx maps to grid index i.
+    const Real grid_x = x * inverse_cell_size_ - 0.5;
+    const Real grid_y = y * inverse_cell_size_ - 0.5;
+    return grid.Sample(grid_x, grid_y, config_.advection_interpolation);
+}
+
+Vector2D Fluid2D::SampleVelocityWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const {
+    return {SampleUWorld_(grid, x, y), SampleVWorld_(grid, x, y)};
+}
+
+Real Fluid2D::SampleUWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const {
+    // U is face-aligned in x and cell-centered in y.
+    const Real grid_x = x * inverse_cell_size_;
+    const Real grid_y = y * inverse_cell_size_ - 0.5;
+    return grid.SampleU(grid_x, grid_y, config_.advection_interpolation);
+}
+
+Real Fluid2D::SampleVWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const {
+    // V is cell-centered in x and face-aligned in y.
+    const Real grid_x = x * inverse_cell_size_ - 0.5;
+    const Real grid_y = y * inverse_cell_size_;
+    return grid.SampleV(grid_x, grid_y, config_.advection_interpolation);
+}
 
 }  // namespace skyspaces
