@@ -54,11 +54,11 @@ Real CellCenteredScalarGrid2D::Sample(Real x, Real y, InterpolationMethod2D meth
     return skyspaces::Sample(data_, width_, height_, x, y, method);
 }
 
-Real CellCenteredScalarGrid2D::Sample(const Vector2D& position) const {
+Real CellCenteredScalarGrid2D::Sample(const Vector2R& position) const {
     return Sample(position.x(), position.y());
 }
 
-Real CellCenteredScalarGrid2D::Sample(const Vector2D& position, InterpolationMethod2D method) const {
+Real CellCenteredScalarGrid2D::Sample(const Vector2R& position, InterpolationMethod2D method) const {
     return Sample(position.x(), position.y(), method);
 }
 
@@ -151,19 +151,19 @@ Real FaceCenteredVectorGrid2D::V(int x, int y) const {
     return v_data_(x, y);
 }
 
-Vector2D FaceCenteredVectorGrid2D::Sample(Real x, Real y) const {
+Vector2R FaceCenteredVectorGrid2D::Sample(Real x, Real y) const {
     return {SampleU(x, y), SampleV(x, y)};
 }
 
-Vector2D FaceCenteredVectorGrid2D::Sample(Real x, Real y, InterpolationMethod2D method) const {
+Vector2R FaceCenteredVectorGrid2D::Sample(Real x, Real y, InterpolationMethod2D method) const {
     return {SampleU(x, y, method), SampleV(x, y, method)};
 }
 
-Vector2D FaceCenteredVectorGrid2D::Sample(const Vector2D& position) const {
+Vector2R FaceCenteredVectorGrid2D::Sample(const Vector2R& position) const {
     return Sample(position.x(), position.y());
 }
 
-Vector2D FaceCenteredVectorGrid2D::Sample(const Vector2D& position, InterpolationMethod2D method) const {
+Vector2R FaceCenteredVectorGrid2D::Sample(const Vector2R& position, InterpolationMethod2D method) const {
     return Sample(position.x(), position.y(), method);
 }
 

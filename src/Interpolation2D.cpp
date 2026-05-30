@@ -7,15 +7,10 @@ namespace skyspaces {
 
 namespace {
 
-// Clamp helper: constrain `v` to the closed interval [a, b]
-inline Real Clamp(Real v, Real a, Real b) {
-    return std::max(a, std::min(v, b));
-}
-
 // Sample a scalar grid stored as an Eigen array with rows as x and columns as y.
 inline Real GetAt(const ScalarArray2D& d, int w, int h, int x, int y) {
-    x = std::max(0, std::min(x, w - 1));
-    y = std::max(0, std::min(y, h - 1));
+    x = std::clamp(x, 0, w - 1);
+    y = std::clamp(y, 0, h - 1);
     return d(x, y);
 }
 
@@ -63,15 +58,15 @@ Real Sample(
 }
 
 Real SampleNearest(const ScalarArray2D& data, int width, int height, Real x, Real y) {
-    int xi = static_cast<int>(std::round(Clamp(x, 0.0, static_cast<Real>(width - 1))));
-    int yi = static_cast<int>(std::round(Clamp(y, 0.0, static_cast<Real>(height - 1))));
+    int xi = static_cast<int>(std::round(std::clamp(x, 0.0, static_cast<Real>(width - 1))));
+    int yi = static_cast<int>(std::round(std::clamp(y, 0.0, static_cast<Real>(height - 1))));
     return GetAt(data, width, height, xi, yi);
 }
 
 Real SampleBilinear(const ScalarArray2D& data, int width, int height, Real x, Real y) {
     // Clamp-to-edge sampling keeps advection stable near solid boundaries.
-    Real cx = Clamp(x, 0.0, static_cast<Real>(width - 1));
-    Real cy = Clamp(y, 0.0, static_cast<Real>(height - 1));
+    Real cx = std::clamp(x, 0.0, static_cast<Real>(width - 1));
+    Real cy = std::clamp(y, 0.0, static_cast<Real>(height - 1));
     int x0 = static_cast<int>(std::floor(cx));
     int y0 = static_cast<int>(std::floor(cy));
     int x1 = x0 + 1;
@@ -90,8 +85,8 @@ Real SampleBilinear(const ScalarArray2D& data, int width, int height, Real x, Re
 }
 
 Real SampleBicubicCatmullRom(const ScalarArray2D& data, int width, int height, Real x, Real y) {
-    Real cx = Clamp(x, 0.0, static_cast<Real>(width - 1));
-    Real cy = Clamp(y, 0.0, static_cast<Real>(height - 1));
+    Real cx = std::clamp(x, 0.0, static_cast<Real>(width - 1));
+    Real cy = std::clamp(y, 0.0, static_cast<Real>(height - 1));
     int ix = static_cast<int>(std::floor(cx));
     int iy = static_cast<int>(std::floor(cy));
     Real tx = cx - ix;
@@ -114,8 +109,8 @@ Real SampleBicubicCatmullRom(const ScalarArray2D& data, int width, int height, R
 }
 
 Real SampleBicubicLagrange(const ScalarArray2D& data, int width, int height, Real x, Real y) {
-    Real cx = Clamp(x, 0.0, static_cast<Real>(width - 1));
-    Real cy = Clamp(y, 0.0, static_cast<Real>(height - 1));
+    Real cx = std::clamp(x, 0.0, static_cast<Real>(width - 1));
+    Real cy = std::clamp(y, 0.0, static_cast<Real>(height - 1));
     int ix = static_cast<int>(std::floor(cx));
     int iy = static_cast<int>(std::floor(cy));
     Real tx = cx - ix;

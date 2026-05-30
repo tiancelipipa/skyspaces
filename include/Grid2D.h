@@ -26,8 +26,8 @@ public:
     // Samples in grid-index coordinates, where cell centers are integer points.
     Real Sample(Real x, Real y) const;
     Real Sample(Real x, Real y, InterpolationMethod2D method) const;
-    Real Sample(const Vector2D& position) const;
-    Real Sample(const Vector2D& position, InterpolationMethod2D method) const;
+    Real Sample(const Vector2R& position) const;
+    Real Sample(const Vector2R& position, InterpolationMethod2D method) const;
 
     const ScalarArray2D& Data() const noexcept;
     ScalarArray2D& Data() noexcept;
@@ -66,10 +66,10 @@ public:
     Real V(int x, int y) const;
 
     // Samples both components in their own staggered index spaces.
-    Vector2D Sample(Real x, Real y) const;
-    Vector2D Sample(Real x, Real y, InterpolationMethod2D method) const;
-    Vector2D Sample(const Vector2D& position) const;
-    Vector2D Sample(const Vector2D& position, InterpolationMethod2D method) const;
+    Vector2R Sample(Real x, Real y) const;
+    Vector2R Sample(Real x, Real y, InterpolationMethod2D method) const;
+    Vector2R Sample(const Vector2R& position) const;
+    Vector2R Sample(const Vector2R& position, InterpolationMethod2D method) const;
     Real SampleU(Real x, Real y) const;
     Real SampleU(Real x, Real y, InterpolationMethod2D method) const;
     Real SampleV(Real x, Real y) const;

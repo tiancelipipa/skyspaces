@@ -5,7 +5,7 @@
 namespace skyspaces {
 
 using Real = double;
-using Vector2D = Eigen::Matrix<Real, 2, 1>;
+using Vector2R = Eigen::Matrix<Real, 2, 1>;
 using Vector2I = Eigen::Vector2i;
 
 // Scalar grid storage. Rows are x and columns are y so grid(x, y) maps

@@ -13,10 +13,10 @@ enum class AdvectionIntegrator2D {
     RungeKutta4,
 };
 
-Vector2D BacktracePosition2D(
+Vector2R BacktracePosition2D(
     AdvectionIntegrator2D integrator,
-    const Vector2D& position,
+    const Vector2R& position,
     Real dt,
-    const std::function<Vector2D(const Vector2D&)>& velocity_at);
+    const std::function<Vector2R(const Vector2R&)>& velocity_at);
 
 }  // namespace skyspaces
