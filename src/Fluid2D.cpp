@@ -2,31 +2,15 @@
 
 #include <Eigen/Sparse>
 
+#include "GridUtils2D.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 #include <vector>
 
 namespace skyspaces {
-
-namespace {
-
-Real Clamp(Real value, Real min_value, Real max_value) {
-    return std::max(min_value, std::min(value, max_value));
-}
-
-int ClampIndex(int value, int min_value, int max_value) {
-    return std::max(min_value, std::min(value, max_value));
-}
-
-int CellIndex(int x, int y, int height) {
-    // Keep vectorized pressure storage aligned with the row-major x/y grid.
-    return x * height + y;
-}
-
-}  // namespace
 
 Fluid2D::Fluid2D(Config config) : config_(config) {
     InitializeFromConfig_();
@@ -42,6 +26,8 @@ void Fluid2D::Reset() {
     vorticity_.Fill(0.0);
     velocity_.Fill(0.0);
     velocity_tmp_.Fill(0.0);
+    solid_.Clear();
+    ConfigureAdvectionScratch_();
 
     time_ = 0.0;
     step_count_ = 0;
@@ -68,7 +54,6 @@ void Fluid2D::Step(Real dt) {
         // Body(External) forces and sources are applied before projection 
         // so that they affect the velocity field used for advection. 
         ApplyConfiguredVelocitySource_(substep_dt);
-        ApplyBuoyancy_(substep_dt);
 
         if (config_.vorticity_confinement > 0.0) {
             ComputeVorticity_();
@@ -112,12 +97,20 @@ void Fluid2D::AddSmokeSourceNormalized_(
     const int width = x_end - x_begin;
     const int height = y_end - y_begin;
 
-    auto smoke = smoke_density_.Data().block(x_begin, y_begin, width, height);
-    smoke = (smoke + smoke_rate * dt).min(config_.max_smoke_density).max(0.0);
-    
     const Real heat_alpha = 1.0 - std::exp(-std::max(0.0, temperature_rate) * dt);
-    auto temperature = temperature_.Data().block(x_begin, y_begin, width, height);
-    temperature += heat_alpha * (target_temperature - temperature);
+    for (int x = x_begin; x < x_begin + width; ++x) {
+        for (int y = y_begin; y < y_begin + height; ++y) {
+            if (IsSolidCell_(x, y)) {
+                continue;
+            }
+
+            smoke_density_(x, y) = std::clamp(
+                smoke_density_(x, y) + smoke_rate * dt,
+                0.0,
+                config_.max_smoke_density);
+            temperature_(x, y) += heat_alpha * (target_temperature - temperature_(x, y));
+        }
+    }
 }
 
 void Fluid2D::AddVelocityImpulseNormalized_(
@@ -125,7 +118,7 @@ void Fluid2D::AddVelocityImpulseNormalized_(
     Real max_x,
     Real min_y,
     Real max_y,
-    Vector2D acceleration,
+    Vector2R acceleration,
     Real dt) {
     assert (min_x >= 0.0 && min_x < max_x && max_x <= 1.0);
     assert (min_y >= 0.0 && min_y < max_y && max_y <= 1.0);
@@ -144,6 +137,9 @@ void Fluid2D::AddVelocityImpulseNormalized_(
 
             const Real px = static_cast<Real>(x) / static_cast<Real>(config_.resolution_x);
             if (px >= min_x && px <= max_x) {
+                if (!IsUFaceOpen_(x, y)) {
+                    continue;
+                }
                 velocity_.U(x, y) += velocity_delta_x;
             }
         }
@@ -158,6 +154,9 @@ void Fluid2D::AddVelocityImpulseNormalized_(
 
             const Real px = (static_cast<Real>(x) + 0.5) / static_cast<Real>(config_.resolution_x);
             if (px >= min_x && px <= max_x) {
+                if (!IsVFaceOpen_(x, y)) {
+                    continue;
+                }
                 velocity_.V(x, y) += velocity_delta_y;
             }
         }
@@ -196,21 +195,41 @@ Real Fluid2D::LastPressureResidual() const noexcept {
     return last_pressure_residual_;
 }
 
+void Fluid2D::ClearSolidBoundary() {
+    solid_.Clear();
+    SetBoundaryConditions_();
+}
+
+void Fluid2D::SetSolidCellMarkers(const CellCenteredScalarGrid2D& solid_cells) {
+    solid_.SetCellMarkers(solid_cells);
+    SetBoundaryConditions_();
+}
+
+void Fluid2D::SetSolidLevelSet(const CellCenteredScalarGrid2D& solid_phi) {
+    solid_.SetLevelSet(solid_phi);
+    SetBoundaryConditions_();
+}
+
+void Fluid2D::SetSolidVelocity(const FaceCenteredVectorGrid2D& solid_velocity) {
+    solid_.SetVelocity(solid_velocity);
+    SetBoundaryConditions_();
+}
+
 Real Fluid2D::SampleSmokeNormalized(Real x, Real y) const {
-    const Real world_x = Clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
-    const Real world_y = Clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
+    const Real world_x = std::clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
+    const Real world_y = std::clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
     return SampleScalarWorld_(smoke_density_, world_x, world_y);
 }
 
 Real Fluid2D::SampleTemperatureNormalized(Real x, Real y) const {
-    const Real world_x = Clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
-    const Real world_y = Clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
+    const Real world_x = std::clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
+    const Real world_y = std::clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
     return SampleScalarWorld_(temperature_, world_x, world_y);
 }
 
-Vector2D Fluid2D::SampleVelocityNormalized(Real x, Real y) const {
-    const Real world_x = Clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
-    const Real world_y = Clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
+Vector2R Fluid2D::SampleVelocityNormalized(Real x, Real y) const {
+    const Real world_x = std::clamp(x, 0.0, 1.0) * static_cast<Real>(config_.resolution_x) * config_.cell_size;
+    const Real world_y = std::clamp(y, 0.0, 1.0) * static_cast<Real>(config_.resolution_y) * config_.cell_size;
     return SampleVelocityWorld_(velocity_, world_x, world_y);
 }
 
@@ -226,11 +245,23 @@ const CellCenteredScalarGrid2D& Fluid2D::SmokeDensity() const noexcept {
     return smoke_density_;
 }
 
+CellCenteredScalarGrid2D& Fluid2D::SmokeDensity() noexcept {
+    return smoke_density_;
+}
+
 const CellCenteredScalarGrid2D& Fluid2D::Temperature() const noexcept {
     return temperature_;
 }
 
+CellCenteredScalarGrid2D& Fluid2D::Temperature() noexcept {
+    return temperature_;
+}
+
 const CellCenteredScalarGrid2D& Fluid2D::Pressure() const noexcept {
+    return pressure_;
+}
+
+CellCenteredScalarGrid2D& Fluid2D::Pressure() noexcept {
     return pressure_;
 }
 
@@ -242,8 +273,24 @@ const CellCenteredScalarGrid2D& Fluid2D::Vorticity() const noexcept {
     return vorticity_;
 }
 
+const CellCenteredScalarGrid2D& Fluid2D::SolidCellMarkers() const noexcept {
+    return solid_.CellMarkers();
+}
+
+const CellCenteredScalarGrid2D& Fluid2D::SolidLevelSet() const noexcept {
+    return solid_.LevelSet();
+}
+
 const FaceCenteredVectorGrid2D& Fluid2D::Velocity() const noexcept {
     return velocity_;
+}
+
+const FaceCenteredVectorGrid2D& Fluid2D::SolidVelocity() const noexcept {
+    return solid_.Velocity();
+}
+
+const Solid2D& Fluid2D::Solid() const noexcept {
+    return solid_;
 }
 
 void Fluid2D::InitializeFromConfig_() {
@@ -259,9 +306,6 @@ void Fluid2D::InitializeFromConfig_() {
     assert (config_.fluid_density > 0.0);
     assert (config_.pressure_iterations > 0);
     assert (config_.pressure_tolerance > 0.0);
-
-    assert (config_.buoyancy_smoke_density_coefficient > 0.0);
-    assert (config_.buoyancy_temperature_coefficient > 0.0);
 
     assert (config_.max_smoke_density > 0.0);
     
@@ -284,6 +328,50 @@ void Fluid2D::InitializeFromConfig_() {
     vorticity_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
     velocity_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
     velocity_tmp_.Resize(config_.resolution_x, config_.resolution_y, 0.0);
+    solid_.Resize(
+        config_.resolution_x,
+        config_.resolution_y,
+        config_.cell_size,
+        config_.numeric_epsilon);
+    ConfigureAdvectionScratch_();
+}
+
+void Fluid2D::ConfigureAdvectionScratch_() {
+    if (config_.advection_scheme == AdvectionScheme2D::SemiLagrangian) {
+        ClearAdvectionScratch_();
+        return;
+    }
+
+    velocity_first_pass_.emplace(config_.resolution_x, config_.resolution_y, 0.0);
+    velocity_back_pass_.emplace(config_.resolution_x, config_.resolution_y, 0.0);
+    velocity_corrected_source_.emplace(config_.resolution_x, config_.resolution_y, 0.0);
+    smoke_first_pass_.emplace(config_.resolution_x, config_.resolution_y, 0.0);
+    smoke_back_pass_.emplace(config_.resolution_x, config_.resolution_y, 0.0);
+    smoke_corrected_source_.emplace(config_.resolution_x, config_.resolution_y, 0.0);
+    temperature_first_pass_.emplace(
+        config_.resolution_x,
+        config_.resolution_y,
+        config_.ambient_temperature);
+    temperature_back_pass_.emplace(
+        config_.resolution_x,
+        config_.resolution_y,
+        config_.ambient_temperature);
+    temperature_corrected_source_.emplace(
+        config_.resolution_x,
+        config_.resolution_y,
+        config_.ambient_temperature);
+}
+
+void Fluid2D::ClearAdvectionScratch_() {
+    velocity_first_pass_.reset();
+    velocity_back_pass_.reset();
+    velocity_corrected_source_.reset();
+    smoke_first_pass_.reset();
+    smoke_back_pass_.reset();
+    smoke_corrected_source_.reset();
+    temperature_first_pass_.reset();
+    temperature_back_pass_.reset();
+    temperature_corrected_source_.reset();
 }
 
 int Fluid2D::ComputeSubstepCount_(Real dt) const {
@@ -329,31 +417,8 @@ void Fluid2D::ApplyConfiguredVelocitySource_(Real dt) {
         config_.source_max_x,
         config_.source_min_y,
         config_.source_max_y,
-        {0.0, config_.source_acceleration_y},
+        {config_.source_acceleration_x, config_.source_acceleration_y},
         dt);
-}
-
-void Fluid2D::ApplyBuoyancy_(Real dt) {
-    const int width = config_.resolution_x;
-    const int interior_height = config_.resolution_y - 1;
-    if (interior_height <= 0) {
-        return;
-    }
-
-    // V samples sit between scalar rows; average neighboring cell-centered
-    // smoke and temperature before applying vertical acceleration.
-    const ScalarArray2D smoke =
-        0.5 * (smoke_density_.Data().block(0, 0, width, interior_height) +
-               smoke_density_.Data().block(0, 1, width, interior_height)).eval();
-    const ScalarArray2D temperature =
-        0.5 * (temperature_.Data().block(0, 0, width, interior_height) +
-               temperature_.Data().block(0, 1, width, interior_height)).eval();
-    velocity_.VData().block(0, 1, width, interior_height) +=
-        (config_.gravity *
-         (config_.buoyancy_temperature_coefficient *
-              (temperature - config_.ambient_temperature) -
-          config_.buoyancy_smoke_density_coefficient * smoke)) *
-        dt;
 }
 
 void Fluid2D::ComputeVorticity_() {
@@ -402,30 +467,13 @@ void Fluid2D::ApplyVorticityConfinement_(Real dt) {
 }
 
 void Fluid2D::AdvectVelocity_(Real dt) {
-    // Semi-Lagrangian advection: trace each face center backward through the
-    // current velocity field, then sample the previous component there.
-    const auto velocity_at = [&](const Vector2D& p) {
-        return SampleVelocityWorld_(velocity_, p.x(), p.y());
-    };
-
-    for (int x = 0; x < velocity_.UWidth(); ++x) {
-        for (int y = 0; y < velocity_.UHeight(); ++y) {
-            const Real world_x = static_cast<Real>(x) * config_.cell_size;
-            const Real world_y = (static_cast<Real>(y) + 0.5) * config_.cell_size;
-            const Vector2D back_position =
-                BacktracePosition2D(config_.advection_integrator, {world_x, world_y}, dt, velocity_at);
-            velocity_tmp_.U(x, y) = SampleUWorld_(velocity_, back_position.x(), back_position.y());
-        }
-    }
-
-    for (int x = 0; x < velocity_.VWidth(); ++x) {
-        for (int y = 0; y < velocity_.VHeight(); ++y) {
-            const Real world_x = (static_cast<Real>(x) + 0.5) * config_.cell_size;
-            const Real world_y = static_cast<Real>(y) * config_.cell_size;
-            const Vector2D back_position =
-                BacktracePosition2D(config_.advection_integrator, {world_x, world_y}, dt, velocity_at);
-            velocity_tmp_.V(x, y) = SampleVWorld_(velocity_, back_position.x(), back_position.y());
-        }
+    switch (config_.advection_scheme) {
+    case AdvectionScheme2D::SemiLagrangian:
+        AdvectVelocitySemiLagrangian2D(*this, dt);
+        break;
+    case AdvectionScheme2D::MacCormackBFECC:
+        AdvectVelocityMacCormackBFECC2D(*this, dt);
+        break;
     }
 
     velocity_.UData() = velocity_tmp_.UData();
@@ -433,30 +481,37 @@ void Fluid2D::AdvectVelocity_(Real dt) {
 }
 
 void Fluid2D::AdvectScalars_(Real dt) {
+    switch (config_.advection_scheme) {
+    case AdvectionScheme2D::SemiLagrangian:
+        AdvectScalarsSemiLagrangian2D(*this, dt);
+        break;
+    case AdvectionScheme2D::MacCormackBFECC:
+        AdvectScalarsMacCormackBFECC2D(*this, dt);
+        break;
+    }
+
+    ApplyScalarAdvectionPostProcess_(dt);
+}
+
+void Fluid2D::ApplyScalarAdvectionPostProcess_(Real dt) {
     const Real smoke_decay = std::exp(-std::max(0.0, config_.smoke_dissipation) * dt);
     const Real temp_decay = std::exp(-std::max(0.0, config_.temperature_dissipation) * dt);
-    const auto velocity_at = [&](const Vector2D& p) {
-        return SampleVelocityWorld_(velocity_, p.x(), p.y());
-    };
 
-    // Scalars are sampled at cell centers and decayed after advection.
     for (int x = 0; x < config_.resolution_x; ++x) {
         for (int y = 0; y < config_.resolution_y; ++y) {
-            const Real world_x = (static_cast<Real>(x) + 0.5) * config_.cell_size;
-            const Real world_y = (static_cast<Real>(y) + 0.5) * config_.cell_size;
-            const Vector2D back_position =
-                BacktracePosition2D(config_.advection_integrator, {world_x, world_y}, dt, velocity_at);
+            if (IsSolidCell_(x, y)) {
+                smoke_density_tmp_(x, y) = 0.0;
+                temperature_tmp_(x, y) = config_.ambient_temperature;
+                continue;
+            }
 
-            smoke_density_tmp_(x, y) = Clamp(
-                SampleScalarWorld_(smoke_density_, back_position.x(), back_position.y()) * smoke_decay,
+            smoke_density_tmp_(x, y) = std::clamp(
+                smoke_density_tmp_(x, y) * smoke_decay,
                 0.0,
                 config_.max_smoke_density);
-
-            const Real advected_temp =
-                SampleScalarWorld_(temperature_, back_position.x(), back_position.y());
             temperature_tmp_(x, y) =
                 config_.ambient_temperature +
-                (advected_temp - config_.ambient_temperature) * temp_decay;
+                (temperature_tmp_(x, y) - config_.ambient_temperature) * temp_decay;
         }
     }
 
@@ -475,6 +530,78 @@ void Fluid2D::ProjectVelocity_(Real dt) {
     const int height = config_.resolution_y;
     const int cell_count = width * height;
     const Real scale = dt / (config_.fluid_density * config_.cell_size * config_.cell_size);
+    std::vector<int> component_id(static_cast<std::size_t>(cell_count), -1);
+    std::vector<int> component_reference_rows;
+    std::vector<Real> component_rhs_sums;
+    std::vector<int> component_cell_counts;
+    std::vector<int> stack;
+    stack.reserve(static_cast<std::size_t>(cell_count));
+
+    for (int start_x = 0; start_x < width; ++start_x) {
+        for (int start_y = 0; start_y < height; ++start_y) {
+            if (IsSolidCell_(start_x, start_y)) {
+                continue;
+            }
+
+            const int start_row = FlattenCellIndex2D(start_x, start_y, height);
+            if (component_id[static_cast<std::size_t>(start_row)] >= 0) {
+                continue;
+            }
+
+            const int id = static_cast<int>(component_reference_rows.size());
+            component_reference_rows.push_back(start_row);
+            component_rhs_sums.push_back(0.0);
+            component_cell_counts.push_back(0);
+
+            stack.clear();
+            stack.push_back(start_row);
+            component_id[static_cast<std::size_t>(start_row)] = id;
+
+            while (!stack.empty()) {
+                const int row = stack.back();
+                stack.pop_back();
+                const int x = row / height;
+                const int y = row - x * height;
+
+                component_rhs_sums[static_cast<std::size_t>(id)] += -divergence_(x, y);
+                ++component_cell_counts[static_cast<std::size_t>(id)];
+
+                const int offsets[4][2] = {
+                    {-1, 0},
+                    {1, 0},
+                    {0, -1},
+                    {0, 1},
+                };
+                for (const auto& offset : offsets) {
+                    const int nx = x + offset[0];
+                    const int ny = y + offset[1];
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height || IsSolidCell_(nx, ny)) {
+                        continue;
+                    }
+
+                    const int neighbor = FlattenCellIndex2D(nx, ny, height);
+                    if (component_id[static_cast<std::size_t>(neighbor)] >= 0) {
+                        continue;
+                    }
+
+                    component_id[static_cast<std::size_t>(neighbor)] = id;
+                    stack.push_back(neighbor);
+                }
+            }
+        }
+    }
+
+    if (component_reference_rows.empty()) {
+        velocity_.Fill(0.0);
+        pressure_.Fill(0.0);
+        divergence_.Fill(0.0);
+        return;
+    }
+
+    std::vector<char> is_pressure_reference(static_cast<std::size_t>(cell_count), 0);
+    for (const int row : component_reference_rows) {
+        is_pressure_reference[static_cast<std::size_t>(row)] = 1;
+    }
 
     // Build a 5-point Poisson stencil. Pinning cell 0 removes the constant
     // pressure nullspace.
@@ -484,17 +611,27 @@ void Fluid2D::ProjectVelocity_(Real dt) {
 
     for (int x = 0; x < width; ++x) {
         for (int y = 0; y < height; ++y) {
-            const int row = CellIndex(x, y, height);
-            if (row == 0) {
-                // Fix one pressure value to define the pressure reference level.
-                // With closed boundaries, pressure is only determined up to a
-                // constant because velocity correction uses pressure gradients.
+            const int row = FlattenCellIndex2D(x, y, height);
+            if (IsSolidCell_(x, y)) {
                 triplets.emplace_back(row, row, 1.0);
                 rhs(row) = 0.0;
                 continue;
             }
 
-            rhs(row) = -divergence_(x, y);
+            if (is_pressure_reference[static_cast<std::size_t>(row)]) {
+                // Fix one pressure value to define the pressure reference level.
+                // Each closed fluid component has its own constant-pressure
+                // nullspace, so each component needs one pinned reference cell.
+                triplets.emplace_back(row, row, 1.0);
+                rhs(row) = 0.0;
+                continue;
+            }
+
+            const int id = component_id[static_cast<std::size_t>(row)];
+            const Real component_mean_rhs =
+                component_rhs_sums[static_cast<std::size_t>(id)] /
+                static_cast<Real>(component_cell_counts[static_cast<std::size_t>(id)]);
+            rhs(row) = -divergence_(x, y) - component_mean_rhs;
 
             Real diagonal = 0.0;
             const int offsets[4][2] = {
@@ -511,9 +648,13 @@ void Fluid2D::ProjectVelocity_(Real dt) {
                     continue;
                 }
 
+                if (IsSolidCell_(nx, ny)) {
+                    continue;
+                }
+
                 diagonal += scale;
-                const int neighbor = CellIndex(nx, ny, height);
-                if (neighbor != 0) {
+                const int neighbor = FlattenCellIndex2D(nx, ny, height);
+                if (!is_pressure_reference[static_cast<std::size_t>(neighbor)]) {
                     triplets.emplace_back(row, neighbor, -scale);
                 }
             }
@@ -555,7 +696,9 @@ void Fluid2D::ProjectVelocity_(Real dt) {
 
     for (int x = 0; x < width; ++x) {
         for (int y = 0; y < height; ++y) {
-            pressure_(x, y) = pressure_result.solution(CellIndex(x, y, height));
+            pressure_(x, y) = IsSolidCell_(x, y)
+                ? 0.0
+                : pressure_result.solution(FlattenCellIndex2D(x, y, height));
         }
     }
 
@@ -563,14 +706,24 @@ void Fluid2D::ProjectVelocity_(Real dt) {
     const ScalarArray2D velocity_v_before_projection = velocity_.VData();
     const Real grad_scale = dt / (config_.fluid_density * config_.cell_size);
     // Subtract pressure gradients on interior faces, then clamp boundaries.
-    velocity_.UData().block(1, 0, width - 1, height) -=
-        grad_scale *
-        (pressure_.Data().block(1, 0, width - 1, height) -
-         pressure_.Data().block(0, 0, width - 1, height));
-    velocity_.VData().block(0, 1, width, height - 1) -=
-        grad_scale *
-        (pressure_.Data().block(0, 1, width, height - 1) -
-         pressure_.Data().block(0, 0, width, height - 1));
+    for (int x = 1; x < width; ++x) {
+        for (int y = 0; y < height; ++y) {
+            if (IsUFaceOpen_(x, y)) {
+                velocity_.U(x, y) -= grad_scale * (pressure_(x, y) - pressure_(x - 1, y));
+            } else {
+                velocity_.U(x, y) = SolidU_(x, y);
+            }
+        }
+    }
+    for (int x = 0; x < width; ++x) {
+        for (int y = 1; y < height; ++y) {
+            if (IsVFaceOpen_(x, y)) {
+                velocity_.V(x, y) -= grad_scale * (pressure_(x, y) - pressure_(x, y - 1));
+            } else {
+                velocity_.V(x, y) = SolidV_(x, y);
+            }
+        }
+    }
 
     SetBoundaryConditions_();
     ComputeDivergence_();
@@ -592,6 +745,26 @@ void Fluid2D::SetBoundaryConditions_() {
     velocity_.UData().row(velocity_.UWidth() - 1).setZero();
     velocity_.VData().col(0).setZero();
     velocity_.VData().col(velocity_.VHeight() - 1).setZero();
+
+    if (!HasSolidBoundary_()) {
+        return;
+    }
+
+    for (int x = 0; x < velocity_.UWidth(); ++x) {
+        for (int y = 0; y < velocity_.UHeight(); ++y) {
+            if (!IsUFaceOpen_(x, y)) {
+                velocity_.U(x, y) = SolidU_(x, y);
+            }
+        }
+    }
+
+    for (int x = 0; x < velocity_.VWidth(); ++x) {
+        for (int y = 0; y < velocity_.VHeight(); ++y) {
+            if (!IsVFaceOpen_(x, y)) {
+                velocity_.V(x, y) = SolidV_(x, y);
+            }
+        }
+    }
 }
 
 void Fluid2D::ComputeDivergence_() {
@@ -603,30 +776,74 @@ void Fluid2D::ComputeDivergence_() {
          velocity_.VData().block(0, 1, width, height) -
          velocity_.VData().block(0, 0, width, height)) *
         inverse_cell_size_;
+
+    if (!HasSolidBoundary_()) {
+        return;
+    }
+
+    for (int x = 0; x < width; ++x) {
+        for (int y = 0; y < height; ++y) {
+            if (IsSolidCell_(x, y)) {
+                divergence_(x, y) = 0.0;
+            }
+        }
+    }
+}
+
+bool Fluid2D::HasSolidBoundary_() const noexcept {
+    return solid_.HasBoundary();
+}
+
+bool Fluid2D::IsSolidCell_(int x, int y) const {
+    return solid_.IsCellSolid(x, y);
+}
+
+bool Fluid2D::IsSolidWorld_(Real x, Real y) const {
+    return solid_.IsWorldSolid(x, y);
+}
+
+bool Fluid2D::IsUFaceOpen_(int x, int y) const {
+    return solid_.IsUFaceOpen(x, y);
+}
+
+bool Fluid2D::IsVFaceOpen_(int x, int y) const {
+    return solid_.IsVFaceOpen(x, y);
+}
+
+Real Fluid2D::SolidU_(int x, int y) const {
+    return solid_.UFaceVelocity(x, y);
+}
+
+Real Fluid2D::SolidV_(int x, int y) const {
+    return solid_.VFaceVelocity(x, y);
+}
+
+Vector2R Fluid2D::ProjectOutOfSolid_(const Vector2R& position, const Vector2R& fallback) const {
+    return solid_.ProjectOutOfSolid(position, fallback);
 }
 
 Real Fluid2D::SampleScalarWorld_(const CellCenteredScalarGrid2D& grid, Real x, Real y) const {
     // World-space cell center (i + 0.5) * dx maps to grid index i.
-    const Real grid_x = x * inverse_cell_size_ - 0.5;
-    const Real grid_y = y * inverse_cell_size_ - 0.5;
+    const Real grid_x = CellCenterGridCoordinate2D(x, inverse_cell_size_);
+    const Real grid_y = CellCenterGridCoordinate2D(y, inverse_cell_size_);
     return grid.Sample(grid_x, grid_y, config_.advection_interpolation);
 }
 
-Vector2D Fluid2D::SampleVelocityWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const {
+Vector2R Fluid2D::SampleVelocityWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const {
     return {SampleUWorld_(grid, x, y), SampleVWorld_(grid, x, y)};
 }
 
 Real Fluid2D::SampleUWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const {
     // U is face-aligned in x and cell-centered in y.
-    const Real grid_x = x * inverse_cell_size_;
-    const Real grid_y = y * inverse_cell_size_ - 0.5;
+    const Real grid_x = FaceGridCoordinate2D(x, inverse_cell_size_);
+    const Real grid_y = CellCenterGridCoordinate2D(y, inverse_cell_size_);
     return grid.SampleU(grid_x, grid_y, config_.advection_interpolation);
 }
 
 Real Fluid2D::SampleVWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const {
     // V is cell-centered in x and face-aligned in y.
-    const Real grid_x = x * inverse_cell_size_ - 0.5;
-    const Real grid_y = y * inverse_cell_size_;
+    const Real grid_x = CellCenterGridCoordinate2D(x, inverse_cell_size_);
+    const Real grid_y = FaceGridCoordinate2D(y, inverse_cell_size_);
     return grid.SampleV(grid_x, grid_y, config_.advection_interpolation);
 }
 

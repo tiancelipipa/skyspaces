@@ -1,16 +1,26 @@
 #pragma once
 
 #include "AdvectionIntegrator2D.h"
+#include "AdvectionScheme2D.h"
 #include "Grid2D.h"
 #include "PressureSolver2D.h"
+#include "Solid2D.h"
+
+#include <optional>
 
 namespace skyspaces {
+
+struct Fluid2DAdvection2D;
 
 // Small 2D smoke simulation using a staggered velocity grid and scalar
 // cell-centered fields. The solver favors clarity and stable building blocks
 // over high-order advection or production renderer features.
 class Fluid2D {
 public:
+    using SolidBoundaryMode = SolidBoundaryMode2D;
+
+    friend struct Fluid2DAdvection2D;
+
     struct Config {
         // Small positive threshold used to avoid division by near-zero values.
         Real numeric_epsilon = 1e-12;
@@ -25,29 +35,23 @@ public:
         // from taking very large jumps when velocities spike.
         Real cfl_number = 1.0;
 
-        AdvectionIntegrator2D advection_integrator = AdvectionIntegrator2D::RungeKutta4;
-        InterpolationMethod2D advection_interpolation = InterpolationMethod2D::BicubicCatmullRom;
-        
-        // Pressure projection solves a sparse Poisson system to reduce
-        // divergence in the staggered velocity field.
-        PressureSolver2D pressure_solver = PressureSolver2D::SparseLU;
-        Real fluid_density = 1.0;
+        AdvectionIntegrator2D advection_integrator = AdvectionIntegrator2D::ExplicitEuler;
+        InterpolationMethod2D advection_interpolation = InterpolationMethod2D::Bilinear;
+        AdvectionScheme2D advection_scheme = AdvectionScheme2D::SemiLagrangian;
+        PressureSolver2D pressure_solver = PressureSolver2D::ConjugateGradient;
+
+        Real fluid_density = 1.0;           // 流体介质的物理密度，影响压力/速度求解
         int pressure_iterations = 400;
         Real pressure_tolerance = 1e-6;
 
-        // Smoke rises when hot and sinks when dense. Vorticity confinement is
-        // optional; it visually restores small-scale swirl lost to advection.
         Real ambient_temperature = 273.15;
-        Real gravity = 9.8;
-        // Buoyancy coefficients are expected to be non-negative. Hotter smoke
-        // rises; denser smoke sinks through the subtraction in the force model.
-        Real buoyancy_temperature_coefficient = 2.0e-3;
-        Real buoyancy_smoke_density_coefficient = 2.0e-2;
+        // Vorticity confinement is optional; it visually restores small-scale
+        // swirl lost to advection.
         Real vorticity_confinement = 0.0;
 
         Real smoke_dissipation = 0.05;
         Real temperature_dissipation = 0.10;
-        Real max_smoke_density = 1.0;
+        Real max_smoke_density = 1.0;       // 烟雾浓度，影响画面里烟有多浓，与 fluid_density 不同
 
         // Source bounds are normalized to the simulation domain [0, 1]^2.
         bool source_enabled = true;
@@ -58,7 +62,8 @@ public:
         Real source_smoke_rate = 2.0;
         Real source_temperature = 650.0;
         Real source_temperature_rate = 6.0;
-        Real source_acceleration_y = 1.5;   // grid units per second^2
+        Real source_acceleration_x = 1.5;   // domain widths per second^2
+        Real source_acceleration_y = 0.0;   // domain heights per second^2
     };
 
     explicit Fluid2D(Config config = {});
@@ -66,6 +71,11 @@ public:
     void Reset();
     void Step();
     void Step(Real dt);
+
+    void ClearSolidBoundary();
+    void SetSolidCellMarkers(const CellCenteredScalarGrid2D& solid_cells);
+    void SetSolidLevelSet(const CellCenteredScalarGrid2D& solid_phi);
+    void SetSolidVelocity(const FaceCenteredVectorGrid2D& solid_velocity);
 
     int ResolutionX() const noexcept;
     int ResolutionY() const noexcept;
@@ -79,37 +89,55 @@ public:
     // Sampling helpers accept normalized coordinates in [0, 1]^2.
     Real SampleSmokeNormalized(Real x, Real y) const;
     Real SampleTemperatureNormalized(Real x, Real y) const;
-    Vector2D SampleVelocityNormalized(Real x, Real y) const;
+    Vector2R SampleVelocityNormalized(Real x, Real y) const;
 
     const Config& Configs() const noexcept;
     Config& Configs() noexcept;
 
     const CellCenteredScalarGrid2D& SmokeDensity() const noexcept;
+    CellCenteredScalarGrid2D& SmokeDensity() noexcept;
     const CellCenteredScalarGrid2D& Temperature() const noexcept;
+    CellCenteredScalarGrid2D& Temperature() noexcept;
     const CellCenteredScalarGrid2D& Pressure() const noexcept;
+    CellCenteredScalarGrid2D& Pressure() noexcept;
     const CellCenteredScalarGrid2D& Divergence() const noexcept;
     const CellCenteredScalarGrid2D& Vorticity() const noexcept;
+    const CellCenteredScalarGrid2D& SolidCellMarkers() const noexcept;
+    const CellCenteredScalarGrid2D& SolidLevelSet() const noexcept;
     const FaceCenteredVectorGrid2D& Velocity() const noexcept;
+    const FaceCenteredVectorGrid2D& SolidVelocity() const noexcept;
+    const Solid2D& Solid() const noexcept;
 
 private:
     void InitializeFromConfig_();
+    void ConfigureAdvectionScratch_();
+    void ClearAdvectionScratch_();
     int ComputeSubstepCount_(Real dt) const;
     Real ComputeMaxSpeed_() const;
 
     void ApplyConfiguredScalarSource_(Real dt);
     void ApplyConfiguredVelocitySource_(Real dt);
-    void ApplyBuoyancy_(Real dt);
     void ComputeVorticity_();
     void ApplyVorticityConfinement_(Real dt);
 
     void AdvectVelocity_(Real dt);
     void AdvectScalars_(Real dt);
+    void ApplyScalarAdvectionPostProcess_(Real dt);
     void ProjectVelocity_(Real dt);
     void SetBoundaryConditions_();
     void ComputeDivergence_();
 
+    bool HasSolidBoundary_() const noexcept;
+    bool IsSolidCell_(int x, int y) const;
+    bool IsSolidWorld_(Real x, Real y) const;
+    bool IsUFaceOpen_(int x, int y) const;
+    bool IsVFaceOpen_(int x, int y) const;
+    Real SolidU_(int x, int y) const;
+    Real SolidV_(int x, int y) const;
+    Vector2R ProjectOutOfSolid_(const Vector2R& position, const Vector2R& fallback) const;
+
     Real SampleScalarWorld_(const CellCenteredScalarGrid2D& grid, Real x, Real y) const;
-    Vector2D SampleVelocityWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const;
+    Vector2R SampleVelocityWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const;
     Real SampleUWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const;
     Real SampleVWorld_(const FaceCenteredVectorGrid2D& grid, Real x, Real y) const;
 
@@ -130,7 +158,7 @@ private:
         Real max_x,
         Real min_y,
         Real max_y,
-        Vector2D acceleration,
+        Vector2R acceleration,
         Real dt);
 
     Config config_;
@@ -150,6 +178,18 @@ private:
     CellCenteredScalarGrid2D vorticity_;
     FaceCenteredVectorGrid2D velocity_;
     FaceCenteredVectorGrid2D velocity_tmp_;
+
+    std::optional<FaceCenteredVectorGrid2D> velocity_first_pass_;
+    std::optional<FaceCenteredVectorGrid2D> velocity_back_pass_;
+    std::optional<FaceCenteredVectorGrid2D> velocity_corrected_source_;
+    std::optional<CellCenteredScalarGrid2D> smoke_first_pass_;
+    std::optional<CellCenteredScalarGrid2D> smoke_back_pass_;
+    std::optional<CellCenteredScalarGrid2D> smoke_corrected_source_;
+    std::optional<CellCenteredScalarGrid2D> temperature_first_pass_;
+    std::optional<CellCenteredScalarGrid2D> temperature_back_pass_;
+    std::optional<CellCenteredScalarGrid2D> temperature_corrected_source_;
+
+    Solid2D solid_;
 };
 
 }  // namespace skyspaces

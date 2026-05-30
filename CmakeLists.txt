@@ -18,6 +18,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # 生成 compile_commands.json，方便 clangd、VS Code 等工具理解项目。
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -29,6 +33,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(SKYSPACES_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(SKYSPACES_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(SKYSPACES_DEMO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/demo")
+set(SKYSPACES_STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/stb")
 
 # Eigen 是 header-only 库，本身不需要编译成 .lib/.dll。
 # 这里关闭 Eigen 自带的测试、文档、demo、BLAS/LAPACK 等内容，
@@ -39,34 +44,80 @@ set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_DEMOS OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_BLAS OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_LAPACK OFF CACHE BOOL "" FORCE)
+set(TINYVDB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(TINYVDB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TINYVDB_BUILD_VDBRENDER OFF CACHE BOOL "" FORCE)
+set(TINYVDB_BUILD_TVDBVIEW OFF CACHE BOOL "" FORCE)
+set(TINYVDB_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
 
 # 把 submodule 中的 Eigen CMake 工程加入当前构建。
 # 这会创建 Eigen3::Eigen 这个 CMake target，后面可以链接到自己的库上。
 add_subdirectory(3rdparty/eigen)
+get_property(SKYSPACES_HAD_CMAKE_WARN_DEPRECATED CACHE CMAKE_WARN_DEPRECATED PROPERTY VALUE SET)
+if(SKYSPACES_HAD_CMAKE_WARN_DEPRECATED)
+    get_property(SKYSPACES_CMAKE_WARN_DEPRECATED CACHE CMAKE_WARN_DEPRECATED PROPERTY VALUE)
+endif()
+
+set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
+add_subdirectory(3rdparty/tinyvdb)
+if(SKYSPACES_HAD_CMAKE_WARN_DEPRECATED)
+    set(CMAKE_WARN_DEPRECATED "${SKYSPACES_CMAKE_WARN_DEPRECATED}" CACHE BOOL "" FORCE)
+else()
+    unset(CMAKE_WARN_DEPRECATED CACHE)
+endif()
+unset(SKYSPACES_CMAKE_WARN_DEPRECATED)
+unset(SKYSPACES_HAD_CMAKE_WARN_DEPRECATED)
 
 # 收集本项目静态库需要编译的 .cpp 文件。
 set(SKYSPACES_LIBRARY_SOURCES
     "${SKYSPACES_SRC_DIR}/AdvectionIntegrator2D.cpp"
+    "${SKYSPACES_SRC_DIR}/AdvectionScheme2D.cpp"
+    "${SKYSPACES_SRC_DIR}/CloudPreviewRenderer.cpp"
+    "${SKYSPACES_SRC_DIR}/CloudPreviewWindow.cpp"
     "${SKYSPACES_SRC_DIR}/Fluid2D.cpp"
     "${SKYSPACES_SRC_DIR}/Grid2D.cpp"
+    "${SKYSPACES_SRC_DIR}/ImageIO.cpp"
     "${SKYSPACES_SRC_DIR}/Interpolation2D.cpp"
+    "${SKYSPACES_SRC_DIR}/InterLayerConvection2D.cpp"
     "${SKYSPACES_SRC_DIR}/PressureSolver2D.cpp"
+    "${SKYSPACES_SRC_DIR}/ProgressBar.cpp"
+    "${SKYSPACES_SRC_DIR}/Solid2D.cpp"
+    "${SKYSPACES_SRC_DIR}/VideoIO.cpp"
+    "${SKYSPACES_SRC_DIR}/VolumeIO3D.cpp"
 )
 
 # 收集本项目公开头文件。
 # 头文件不会被“编译”，但列在 target 里可以让 IDE 显示得更完整。
 set(SKYSPACES_LIBRARY_HEADERS
     "${SKYSPACES_INCLUDE_DIR}/AdvectionIntegrator2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/AdvectionScheme2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/CloudPreviewRenderer.h"
+    "${SKYSPACES_INCLUDE_DIR}/CloudPreviewWindow.h"
     "${SKYSPACES_INCLUDE_DIR}/Fluid2D.h"
     "${SKYSPACES_INCLUDE_DIR}/Grid2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/GridUtils2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/ImageIO.h"
     "${SKYSPACES_INCLUDE_DIR}/Interpolation2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/InterLayerConvection2D.h"
     "${SKYSPACES_INCLUDE_DIR}/MathTypes.h"
     "${SKYSPACES_INCLUDE_DIR}/PressureSolver2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/ProgressBar.h"
+    "${SKYSPACES_INCLUDE_DIR}/Solid2D.h"
+    "${SKYSPACES_INCLUDE_DIR}/VideoIO.h"
+    "${SKYSPACES_INCLUDE_DIR}/VolumeIO3D.h"
 )
 
 # 收集 demo 程序的源文件。demo 是独立可执行程序，用来演示库的使用方式。
-set(SKYSPACES_DEMO_SOURCES
+set(SKYSPACES_SMOKE_DENSITY_DEMO_SOURCES
     "${SKYSPACES_DEMO_DIR}/SmokeDensityDemo.cpp"
+)
+
+set(SKYSPACES_INTER_LAYER_CONVECTION_DEMO_SOURCES
+    "${SKYSPACES_DEMO_DIR}/InterLayerConvectionDemo.cpp"
+)
+
+set(SKYSPACES_CLOUD_LAYER_VOLUME_DEMO_SOURCES
+    "${SKYSPACES_DEMO_DIR}/CloudLayerVolumeDemo.cpp"
 )
 
 # 创建一个静态库 target，名字是 skyspaces_2d_fluid。
@@ -81,6 +132,8 @@ add_library(skyspaces_2d_fluid STATIC
 target_include_directories(skyspaces_2d_fluid
     PUBLIC
         "${SKYSPACES_INCLUDE_DIR}"
+    PRIVATE
+        "${SKYSPACES_STB_DIR}"
 )
 
 # 让 skyspaces_2d_fluid 使用 Eigen。
@@ -88,7 +141,18 @@ target_include_directories(skyspaces_2d_fluid
 target_link_libraries(skyspaces_2d_fluid
     PUBLIC
         Eigen3::Eigen
+    PRIVATE
+        tinyvdb_mesh_ops
+        tinyvdb
 )
+
+if(WIN32)
+    target_link_libraries(skyspaces_2d_fluid
+        PUBLIC
+            user32
+            gdi32
+    )
+endif()
 
 # 明确声明这个 target 需要 C++17。
 # 即使以后项目里出现多个 target，也能保证这个库自己的语言标准正确。
@@ -96,7 +160,15 @@ target_compile_features(skyspaces_2d_fluid PUBLIC cxx_std_17)
 
 # 创建一个演示程序：运行 2D 烟雾模拟，并把烟雾密度保存为 PNG 图片。
 add_executable(skyspaces_smoke_density_demo
-    ${SKYSPACES_DEMO_SOURCES}
+    ${SKYSPACES_SMOKE_DENSITY_DEMO_SOURCES}
+)
+
+add_executable(skyspaces_inter_layer_convection_demo
+    ${SKYSPACES_INTER_LAYER_CONVECTION_DEMO_SOURCES}
+)
+
+add_executable(skyspaces_cloud_layer_volume_demo
+    ${SKYSPACES_CLOUD_LAYER_VOLUME_DEMO_SOURCES}
 )
 
 # demo 依赖前面创建的静态库，因此只需要链接 skyspaces_2d_fluid。
@@ -106,7 +178,19 @@ target_link_libraries(skyspaces_smoke_density_demo
         skyspaces_2d_fluid
 )
 
+target_link_libraries(skyspaces_inter_layer_convection_demo
+    PRIVATE
+        skyspaces_2d_fluid
+)
+
+target_link_libraries(skyspaces_cloud_layer_volume_demo
+    PRIVATE
+        skyspaces_2d_fluid
+)
+
 target_compile_features(skyspaces_smoke_density_demo PRIVATE cxx_std_17)
+target_compile_features(skyspaces_inter_layer_convection_demo PRIVATE cxx_std_17)
+target_compile_features(skyspaces_cloud_layer_volume_demo PRIVATE cxx_std_17)
 
 # 根据不同编译器设置警告选项。
 # MSVC 是 Visual Studio 的 C++ 编译器；else 分支通常对应 GCC/Clang。
@@ -122,6 +206,26 @@ if(MSVC)
     )
 
     target_compile_options(skyspaces_smoke_density_demo
+        PRIVATE
+            /utf-8
+    )
+
+    target_compile_options(skyspaces_inter_layer_convection_demo
+        PRIVATE
+            /utf-8
+    )
+
+    target_compile_options(skyspaces_cloud_layer_volume_demo
+        PRIVATE
+            /utf-8
+    )
+
+    target_compile_options(tinyvdb
+        PRIVATE
+            /utf-8
+    )
+
+    target_compile_options(tinyvdb_mesh_ops
         PRIVATE
             /utf-8
     )
@@ -165,6 +269,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     ${SKYSPACES_LIBRARY_SOURCES}
     ${SKYSPACES_LIBRARY_HEADERS}
     ${SKYSPACES_DEMO_SOURCES}
+    ${SKYSPACES_INTER_LAYER_CONVECTION_DEMO_SOURCES}
+    ${SKYSPACES_CLOUD_LAYER_VOLUME_DEMO_SOURCES}
 )
 
 # 配置阶段打印一些信息，方便确认当前使用的生成器和编译器。
