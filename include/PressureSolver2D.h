@@ -8,8 +8,14 @@
 namespace skyspaces {
 
 enum class PressureSolver2D {
+    Jacobi,
+    GaussSeidel,
+    SuccessiveOverRelaxation,
     ConjugateGradient,
+    ConjugateGradientNoPreconditioner,
     BiCGSTAB,
+    LeastSquaresConjugateGradient,
+    SimplicialLLT,
     SimplicialLDLT,
     SparseLU,
 };
