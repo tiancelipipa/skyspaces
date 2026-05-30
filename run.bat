@@ -7,6 +7,11 @@ if /I not "%BUILD_CONFIG%"=="Release" if /I not "%BUILD_CONFIG%"=="Debug" (
     exit /b 1
 )
 
+if not exist build (
+    cmake -S . -B build
+    if errorlevel 1 exit /b %errorlevel%
+)
+
 cmake --build build --target skyspaces_smoke_density_demo --config "%BUILD_CONFIG%"
 if errorlevel 1 exit /b %errorlevel%
 
