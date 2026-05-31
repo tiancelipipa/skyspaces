@@ -276,3 +276,6 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
 # 配置阶段打印一些信息，方便确认当前使用的生成器和编译器。
 message(STATUS "Configuring for generator: ${CMAKE_GENERATOR}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+
+add_subdirectory(reference/euler3d)
+# add_subdirectory(reference/compare_2d_layered_vs_3d)
